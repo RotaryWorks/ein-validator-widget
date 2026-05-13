@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>EIN Eligibility Validator</title>
+
+  <style>
+    :root{
+      --ok:#107c10;
+      --bad:#a80000;
+      --warn:#8a6d3b;
+      --muted:#605e5c;
+      --border:#d6d6d6;
+      --bg:#ffffff;
+      --soft:#f7f7f7;
+      --shadow: 0 2px 10px rgba(0,0,0,.06);
+      --radius: 12px;
+      --font: 14px/1.35 "Segoe UI", Arial, sans-serif;
+    }
+    body{ margin:0; padding:14px; background:var(--bg); font:var(--font); color:#111; }
+    .wrap{ max-width:900px; margin:0 auto; }
+    .card{ border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow); background:#fff; padding:14px; }
+    .title{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .title h2{ margin:0; font-size:18px; }
+    .pill{ font-size:12px; color:var(--muted); background:var(--soft); border:1px solid var(--border); border-radius:999px; padding:4px 10px; white-space:nowrap; }
+    .grid{ display:grid; grid-template-columns:1.1fr 1fr; gap:12px; margin-top:12px; }
+    @media (max-width:720px){ .grid{ grid-template-columns:1fr; } }
+    label{ font-weight:600; }
+    .field{ border:1px solid var(--border); border-radius:10px; padding:10px; background:#fff; }
+    .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    input[type="text"]{ padding:10px 12px; border:1px solid var(--border); border-radius:10px; width:220px; font-size:14px; }
+    select{ padding:10px 12px; border:1px solid var(--border); border-radius:10px; font-size:14px; width:100%; max-width:360px; }
+    .btn{ padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--soft); cursor:pointer; font-size:14px; }
+    .btn.primary{ background:#1f6feb; border-color:#1f6feb; color:#fff; }
+    .btn:disabled{ opacity:.6; cursor:not-allowed; }
+    .hint{ margin-top:8px; color:var(--muted); font-size:12px; }
+    .result{ margin-top:12px; border:1px solid var(--border); border-radius:var(--radius); padding:12px; background:#fafafa; }
+    .badge{ display:inline-block; padding:6px 10px; border-radius:999px; font-weight:700; border:1px solid transparent; margin-bottom:10px; }
+    .badge.ok{ color:var(--ok); border-color: rgba(16,124,16,.35); background: rgba(16,124,16,.08); }
+    .badge.bad{ color:var(--bad); border-color: rgba(168,0,0,.35); background: rgba(168,0,0,.08); }
+    .badge.warn{ color:var(--warn); border-color: rgba(138,109,59,.35); background: rgba(138,109,59,.12); }
+    .details{ white-space:pre-wrap; color:#222; font-size:13px; }
+    .actions{ display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; }
+    .copyNote{ color:var(--muted); font-size:12px; margin-top:6px; }
+    .divider{ height:1px; background:var(--border); margin:10px 0; }
+    .warnBox{ margin-top:10px; border:1px solid rgba(138,109,59,.35); background: rgba(138,109,59,.12); border-radius:10px; padding:10px; color:#5a4a1b; display:none; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="title">
+        <h2>EIN Eligibility Validator</h2>
+        <div class="pill">ProPublica Nonprofit Explorer API v2</div>
+      </div>
+
+      <div class="grid">
+        <div class="field">
+          <label for="ein">EIN (9 digits)</label>
+          <div class="row" style="margin-top:8px;">
+            <input id="ein" type="text" inputmode="numeric" autocomplete="off" placeholder="e.g., 142007220" />
+            <button id="validateBtn" class="btn primary" type="button">Validate</button>
+          </div>
+          <div class="hint">Display format: <span class="mono" id="einPretty">—</span></div>
+          <div class="hint" id="paramHint"></div>
+        </div>
+
+        <div class="field">
+          <label for="orgType">Organization Type (your selection)</label>
+          <div style="margin-top:8px;">
+            <select id="orgType">
+              <option value="501c3">501(c)(3)</option>
+              <option value="501c1">501(c)(1)</option>
+              <option value="170c1">Government entity under IRC §170(c)(1)</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div class="hint">If “Other” is selected, we show a documentation note and treat it as PASS.</div>
+        </div>
+      </div>
+
+      <div class="result" id="resultBox">
+        <div class="badge" id="badge">NOT VALIDATED</div>
+        <div class="details" id="details">Enter an EIN, choose an organization type, then click Validate.</div>
+
+        <div class="warnBox" id="warnBox"></div>
+
+        <div class="actions">
+          <button id="copyResultBtn" class="btn" type="button" disabled>Copy Result</button>
+          <button id="copyEinBtn" class="btn" type="button" disabled>Copy EIN (digits)</button>
+          <button id="copyEinPrettyBtn" class="btn" type="button" disabled>Copy EIN (XX-XXXXXXX)</button>
+        </div>
+        <div class="copyNote" id="copyNote"></div>
+
+        <div class="divider"></div>
+        <div class="hint">If documentation is requested, attach it in the form’s upload section.</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ProPublica Nonprofit Explorer API v2 supports JSON and JSONP via callback. [5](https://www.charityquery.com/docs)
+    const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2";
+
+    const OTHER_WARNING =
+      "Your EIN did not Pass validation of eligibility. Additional documentation may be necessary. " +
+      "Please attach any relevant supplemental documents you have at the bottom of this application, " +
+      "or we may request additional documentation before funds are issued.";
+
+    const einEl = document.getElementById("ein");
+    const einPrettyEl = document.getElementById("einPretty");
+    const orgTypeEl = document.getElementById("orgType");
+    const validateBtn = document.getElementById("validateBtn");
+    const badgeEl = document.getElementById("badge");
+    const detailsEl = document.getElementById("details");
+    const warnBoxEl = document.getElementById("warnBox");
+    const copyResultBtn = document.getElementById("copyResultBtn");
+    const copyEinBtn = document.getElementById("copyEinBtn");
+    const copyEinPrettyBtn = document.getElementById("copyEinPrettyBtn");
+    const copyNoteEl = document.getElementById("copyNote");
+    const paramHintEl = document.getElementById("paramHint");
+
+    let lastComputed = {
+      status: "NOT_VALIDATED",
+      einDigits: "",
+      einPretty: "",
+      selectedType: "",
+      propublicaFound: null,
+      organizationName: null,
+      subsection_code: null,
+      note: ""
+    };
+
+    function normalizeEin(raw){ return String(raw || "").replace(/\D/g, ""); }
+    function formatEinPretty(digits){
+      if (!digits || digits.length !== 9) return "—";
+      return digits.slice(0,2) + "-" + digits.slice(2);
+    }
+    function setBadge(kind, text){
+      badgeEl.className = "badge " + (kind || "");
+      badgeEl.textContent = text;
+    }
+    function setCopyNote(msg){
+      copyNoteEl.textContent = msg || "";
+      setTimeout(() => { copyNoteEl.textContent = ""; }, 2500);
+    }
+    async function copyText(label, text){
+      try{
+        await navigator.clipboard.writeText(text);
+        setCopyNote(`Copied: ${label}`);
+      } catch {
+        setCopyNote("Copy failed; select and copy manually.");
+      }
+    }
+
+    // JSONP fallback: ProPublica supports callback param. [5](https://www.charityquery.com/docs)
+    function jsonp(url){
+      return new Promise((resolve, reject) => {
+        const cb = "pp_cb_" + Math.random().toString(36).slice(2);
+        const script = document.createElement("script");
+        const timer = setTimeout(() => { cleanup(); reject(new Error("JSONP timeout")); }, 12000);
+
+        function cleanup(){
+          clearTimeout(timer);
+          try{ delete window[cb]; } catch {}
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+
+        window[cb] = (data) => { cleanup(); resolve(data); };
+        script.onerror = () => { cleanup(); reject(new Error("JSONP error")); };
+
+        const sep = url.includes("?") ? "&" : "?";
+        script.src = url + sep + "callback=" + cb;
+        document.head.appendChild(script);
+      });
+    }
+
+    async function getOrganization(einDigits){
+      const url = `${PROPUBLICA_BASE}/organizations/${einDigits}.json`; // org endpoint [5](https://www.charityquery.com/docs)
+      try{
+        const resp = await fetch(url, { method: "GET" }); // API accepts GET [5](https://www.charityquery.com/docs)
+        if (resp.status === 404) return { found: false, org: null };
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        return { found: !!data.organization, org: data.organization || null };
+      } catch {
+        const data = await jsonp(url);
+        return { found: !!(data && data.organization), org: (data && data.organization) || null };
+      }
+    }
+
+    function claimedLabel(v){
+      if (v === "501c3") return "501(c)(3)";
+      if (v === "501c1") return "501(c)(1)";
+      if (v === "170c1") return "IRC §170(c)(1) Government";
+      return "Other";
+    }
+
+    function decide(selectedType, found, subsection){
+      if (selectedType === "other") return { pass:true, warn:true, reason:"OTHER" };
+      if (selectedType === "170c1") return { pass: !found, warn:false, reason: (!found ? "NOT_FOUND_MATCH" : "FOUND_MISMATCH") };
+      if (!found) return { pass:false, warn:false, reason:"NOT_FOUND" };
+      if (selectedType === "501c3") return { pass: subsection === 3, warn:false, reason: (subsection===3 ? "MATCH_501C3" : "SUBSECTION_MISMATCH") };
+      if (selectedType === "501c1") return { pass: subsection === 1, warn:false, reason: (subsection===1 ? "MATCH_501C1" : "SUBSECTION_MISMATCH") };
+      return { pass:false, warn:false, reason:"UNKNOWN" };
+    }
+
+    function renderResult(summary){
+      if (lastComputed.status === "PASS" && lastComputed.note === "OTHER_WARNING"){
+        setBadge("warn", "PASS (Other) — Documentation may be required");
+      } else if (lastComputed.status === "PASS"){
+        setBadge("ok", "PASS — Verified");
+      } else if (lastComputed.status === "FAIL"){
+        setBadge("bad", "FAIL — Not verified");
+      } else {
+        setBadge("", "NOT VALIDATED");
+      }
+
+      const lines = [];
+      lines.push(`EIN: ${lastComputed.einPretty} (${lastComputed.einDigits || "—"})`);
+      lines.push(`Selected Type: ${claimedLabel(lastComputed.selectedType)}`);
+
+      if (lastComputed.propublicaFound === true){
+        lines.push("ProPublica: Found organization");
+        if (lastComputed.organizationName) lines.push(`Name: ${lastComputed.organizationName}`);
+        if (typeof lastComputed.subsection_code === "number") lines.push(`subsection_code: ${lastComputed.subsection_code}`);
+      } else if (lastComputed.propublicaFound === false){
+        lines.push("ProPublica: No organization record found");
+      } else {
+        lines.push("ProPublica: (not checked)");
+      }
+
+      if (summary){
+        lines.push("");
+        lines.push(`Summary: ${summary}`);
+      }
+
+      detailsEl.textContent = lines.join("\n");
+
+      if (lastComputed.note === "OTHER_WARNING"){
+        warnBoxEl.style.display = "block";
+        warnBoxEl.textContent = OTHER_WARNING;
+      } else {
+        warnBoxEl.style.display = "none";
+        warnBoxEl.textContent = "";
+      }
+
+      const canCopy = (lastComputed.status !== "NOT_VALIDATED");
+      copyResultBtn.disabled = !canCopy;
+      copyEinBtn.disabled = !(lastComputed.einDigits && lastComputed.einDigits.length === 9);
+      copyEinPrettyBtn.disabled = !(lastComputed.einPretty && lastComputed.einPretty !== "—");
+    }
+
+    function buildCopyResultText(){
+      const parts = [];
+      parts.push(`${lastComputed.status}`);
+      parts.push(`EIN=${lastComputed.einPretty}`);
+      parts.push(`Selected=${claimedLabel(lastComputed.selectedType)}`);
+      if (lastComputed.propublicaFound === true){
+        parts.push("Found=Yes");
+        if (typeof lastComputed.subsection_code === "number") parts.push(`Subsection=${lastComputed.subsection_code}`);
+        if (lastComputed.organizationName) parts.push(`Name=${lastComputed.organizationName}`);
+      } else if (lastComputed.propublicaFound === false){
+        parts.push("Found=No");
+      }
+      if (lastComputed.note === "OTHER_WARNING") parts.push("Note=Documentation may be required");
+      return parts.join(" | ");
+    }
+
+    function updateEinDisplay(){
+      const digits = normalizeEin(einEl.value).slice(0,9);
+      einPrettyEl.textContent = formatEinPretty(digits);
+    }
+
+    einEl.addEventListener("input", () => {
+      const digits = normalizeEin(einEl.value);
+      if (digits.length > 9) einEl.value = digits.slice(0,9);
+      updateEinDisplay();
+    });
+
+    async function validate(auto=false){
+      const einDigits = normalizeEin(einEl.value);
+      const selectedType = orgTypeEl.value;
+
+      lastComputed = {
+        status: "NOT_VALIDATED",
+        einDigits,
+        einPretty: formatEinPretty(einDigits),
+        selectedType,
+        propublicaFound: null,
+        organizationName: null,
+        subsection_code: null,
+        note: ""
+      };
+
+      if (einDigits.length !== 9){
+        lastComputed.status = "FAIL";
+        renderResult("EIN must be exactly 9 digits.");
+        return;
+      }
+
+      // Other: PASS + warning, no API call.
+      if (selectedType === "other"){
+        lastComputed.status = "PASS";
+        lastComputed.note = "OTHER_WARNING";
+        renderResult("Other selected. Additional documentation may be necessary.");
+        return;
+      }
+
+      validateBtn.disabled = true;
+      setBadge("", auto ? "AUTO-CHECKING…" : "CHECKING…");
+      detailsEl.textContent = "Checking ProPublica…";
+      warnBoxEl.style.display = "none";
+
+      try{
+        const { found, org } = await getOrganization(einDigits);
+        const subsection = (org && typeof org.subsection_code === "number") ? org.subsection_code : null;
+        const name = (org && org.name) ? String(org.name) : null;
+
+        lastComputed.propublicaFound = found;
+        lastComputed.subsection_code = subsection;
+        lastComputed.organizationName = name;
+
+        const d = decide(selectedType, found, subsection);
+        lastComputed.status = d.pass ? "PASS" : "FAIL";
+
+        let summary = "";
+        if (selectedType === "170c1"){
+          summary = d.pass
+            ? "No ProPublica record found (passes 170(c)(1) rule)."
+            : "ProPublica found an exempt organization record (fails 170(c)(1) rule).";
+        } else {
+          summary = d.pass
+            ? "Selection matches ProPublica classification."
+            : (found ? "EIN found, but does not match the selected organization type." : "No ProPublica organization record found for this EIN.");
+        }
+
+        renderResult(summary);
+
+      } catch (e){
+        lastComputed.status = "FAIL";
+        renderResult("Validation failed due to a network/API error. Try again later.");
+      } finally {
+        validateBtn.disabled = false;
+      }
+    }
+
+    validateBtn.addEventListener("click", () => validate(false));
+    einEl.addEventListener("keydown", (e) => { if (e.key === "Enter") validate(false); });
+
+    copyResultBtn.addEventListener("click", () => copyText("Result", buildCopyResultText()));
+    copyEinBtn.addEventListener("click", () => copyText("EIN digits", lastComputed.einDigits));
+    copyEinPrettyBtn.addEventListener("click", () => copyText("EIN formatted", lastComputed.einPretty));
+
+    // -----------------------------
+    // NEW: Load params from URL OR document.referrer
+    // Params supported:
+    //   ein=#########
+    //   type=501c3|501c1|170c1|other
+    //   autostart=1|true  (auto-run validation)
+    // -----------------------------
+    function readParamsFromUrl(url){
+      try{
+        const u = new URL(url);
+        const p = u.searchParams;
+        return {
+          ein: p.get("ein") || "",
+          type: p.get("type") || p.get("org_type") || "",
+          autostart: (p.get("autostart") || "").toLowerCase()
+        };
+      } catch {
+        return { ein:"", type:"", autostart:"" };
+      }
+    }
+
+    (function init(){
+      updateEinDisplay();
+
+      const here = readParamsFromUrl(window.location.href);
+      const ref  = document.referrer ? readParamsFromUrl(document.referrer) : { ein:"", type:"", autostart:"" };
+
+      // Prefer explicit URL params; fallback to referrer params if missing
+      const ein = here.ein || ref.ein;
+      const type = here.type || ref.type;
+      const autostart = here.autostart || ref.autostart;
+
+      const hasEin = normalizeEin(ein).length === 9;
+      const hasType = ["501c3","501c1","170c1","other"].includes((type || "").toLowerCase());
+      const shouldAutostart = ["1","true","yes","y"].includes((autostart || "").toLowerCase());
+
+      if (ein){
+        einEl.value = normalizeEin(ein).slice(0,9);
+        updateEinDisplay();
+      }
+      if (hasType){
+        orgTypeEl.value = type.toLowerCase();
+      }
+
+      if (hasEin && hasType){
+        paramHintEl.textContent = shouldAutostart
+          ? "Loaded EIN/type from parameters. Auto-validating…"
+          : "Loaded EIN/type from parameters. Click Validate to run the check.";
+      } else if (ein || type){
+        paramHintEl.textContent = "Some parameters were provided but incomplete; enter missing values to validate.";
+      } else {
+        paramHintEl.textContent = "";
+      }
+
+      if (hasEin && hasType && shouldAutostart){
+        validate(true);
+      }
+    })();
+  </script>
+</body>
+</html>
