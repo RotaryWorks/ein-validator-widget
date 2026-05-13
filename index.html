@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>EIN Eligibility Validator</title>
+
+  <!-- Jotform Custom Widget API -->
+  //js.jotform.com/JotFormCustomWidget.min.jsscript> <!-- [1](https://nonprofit-open-data-collective.github.io/propublica-api/) -->
+
+  <style>
+    :root{
+      --ok:#107c10;
+      --bad:#a80000;
+      --warn:#8a6d3b;
+      --muted:#605e5c;
+      --bg:#ffffff;
+      --border:#d1d1d1;
+      --soft:#f6f6f6;
+      --font: 14px/1.35 "Segoe UI", Arial, sans-serif;
+    }
+    body{ margin:0; padding:12px; background:var(--bg); font:var(--font); color:#111; }
+    .card{ border:1px solid var(--border); border-radius:8px; padding:12px; background:#fff; }
+    .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    label{ font-weight:600; }
+    input[type="text"]{ padding:8px 10px; border:1px solid var(--border); border-radius:6px; width:220px; }
+    button{ padding:9px 12px; border:1px solid var(--border); border-radius:6px; background:var(--soft); cursor:pointer; }
+    button:hover{ filter:brightness(0.98); }
+    .radio-grid{ margin-top:10px; display:grid; grid-template-columns: 1fr; gap:6px; }
+    .radio-item{ display:flex; gap:8px; align-items:flex-start; padding:8px; border:1px solid var(--border); border-radius:6px; }
+    .radio-item input{ margin-top:2px; }
+    .help{ margin-top:8px; color:var(--muted); font-size:12px; }
+    .status{ margin-top:12px; padding:10px; border-radius:6px; border:1px solid var(--border); background:#fafafa; }
+    .status.ok{ border-color: rgba(16,124,16,.35); background: rgba(16,124,16,.08); color: var(--ok); }
+    .status.bad{ border-color: rgba(168,0,0,.35); background: rgba(168,0,0,.08); color: var(--bad); }
+    .status.warn{ border-color: rgba(138,109,59,.35); background: rgba(138,109,59,.12); color: var(--warn); }
+    .small{ font-size:12px; color:var(--muted); margin-top:6px; white-space:pre-wrap; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="ein">EIN</label><br/>
+        <input id="ein" type="text" inputmode="numeric" placeholder="9 digits (e.g., 123456789)" />
+      </div>
+      <div style="padding-top:18px;">
+        <button id="validateBtn" type="button">Validate</button>
+      </div>
+    </div>
+
+    <div class="radio-grid" role="radiogroup" aria-label="Organization Type">
+      <div class="radio-item">
+        <input type="radio" name="orgType" id="t501c3" value="501c3" checked />
+        <div>
+          <label for="t501c3">501(c)(3)</label>
+          <div class="help">We will confirm via ProPublica subsection code = 3.</div>
+        </div>
+      </div>
+
+      <div class="radio-item">
+        <input type="radio" name="orgType" id="t501c1" value="501c1" />
+        <div>
+          <label for="t501c1">501(c)(1)</label>
+          <div class="help">We will confirm via ProPublica subsection code = 1.</div>
+        </div>
+      </div>
+
+      <div class="radio-item">
+        <input type="radio" name="orgType" id="t170c1" value="170c1" />
+        <div>
+          <label for="t170c1">Government entity under IRC §170(c)(1)</label>
+          <div class="help">Passes if ProPublica returns no organization record for the EIN.</div>
+        </div>
+      </div>
+
+      <div class="radio-item">
+        <input type="radio" name="orgType" id="tOther" value="other" />
+        <div>
+          <label for="tOther">Other</label>
+          <div class="help">Always passes, but may require additional documentation.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="status" class="status">
+      <div id="statusTitle"><strong>Not validated yet.</strong></div>
+      <div id="statusDetails" class="small"></div>
+    </div>
+  </div>
+
+  <script>
+    // ---------------------------
+    // Constants / configuration
+    // ---------------------------
+    const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2"; // [2](https://www.irs.gov/businesses/employer-identification-number)
+    const WARNING_TEXT =
+      "Your EIN did not Pass validation of eligibility. Additional documentation may be necessary. " +
+      "Please attach any relevant supplemental documents you have at the bottom of this application, " +
+      "or we may request additional documentation before funds are issued.";
+
+    // ---------------------------
+    // Widget state
+    // ---------------------------
+    let last = {
+      ein: "",
+      claimedType: "501c3",
+      result: "NOT_CHECKED",            // PASS | FAIL | NOT_CHECKED
+      propublicaFound: null,            // true | false | null
+      subsection_code: null,            // number | null
+      organizationName: null,           // string | null
+      warning: false,                   // boolean
+      message: "Not validated yet.",
+      checkedAt: null                   // ISO string | null
+    };
+
+    // This determines whether Jotform submission should be allowed.
+    let lastValid = false;
+
+    // ---------------------------
+    // DOM helpers
+    // ---------------------------
+    const $ein = document.getElementById("ein");
+    const $btn = document.getElementById("validateBtn");
+    const $status = document.getElementById("status");
+    const $statusTitle = document.getElementById("statusTitle");
+    const $statusDetails = document.getElementById("statusDetails");
+
+    function getClaimedType() {
+      const checked = document.querySelector('input[name="orgType"]:checked');
+      return checked ? checked.value : "501c3";
+    }
+
+    function normalizeEin(raw) {
+      return String(raw || "").replace(/\D/g, "");
+    }
+
+    function setStatus(kind, title, details) {
+      $status.className = "status " + (kind || "");
+      $statusTitle.innerHTML = "<strong>" + title + "</strong>";
+      $statusDetails.textContent = details || "";
+      tryResize();
+    }
+
+    function tryResize() {
+      // Ask Jotform to resize the iframe if needed. [1](https://nonprofit-open-data-collective.github.io/propublica-api/)
+      try {
+        if (typeof JFCustomWidget !== "undefined") {
+          JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight });
+        }
+      } catch {}
+    }
+
+    function publishToJotform() {
+      // Widgets send values to Jotform as strings; JSON string is fine. [1](https://nonprofit-open-data-collective.github.io/propublica-api/)
+      const value = JSON.stringify(last);
+      JFCustomWidget.sendData({ value }); // [1](https://nonprofit-open-data-collective.github.io/propublica-api/)
+    }
+
+    // ---------------------------
+    // ProPublica API calls
+    // ---------------------------
+    async function fetchOrgFetchApi(ein) {
+      const url = `${PROPUBLICA_BASE}/organizations/${ein}.json`; // [2](https://www.irs.gov/businesses/employer-identification-number)
+      const resp = await fetch(url, { method: "GET" }); // ProPublica accepts GET requests. [2](https://www.irs.gov/businesses/employer-identification-number)
+      if (resp.status === 404) return { found: false, org: null };
+      if (!resp.ok) throw new Error(`ProPublica error ${resp.status}`);
+      const data = await resp.json();
+      return { found: !!data.organization, org: data.organization || null };
+    }
+
+    // JSONP fallback (ProPublica supports JSONP via callback param). [2](https://www.irs.gov/businesses/employer-identification-number)
+    function fetchOrgJsonp(ein) {
+      return new Promise((resolve, reject) => {
+        const cb = "pp_cb_" + Math.random().toString(36).slice(2);
+        const url = `${PROPUBLICA_BASE}/organizations/${ein}.json?callback=${cb}`;
+        const script = document.createElement("script");
+
+        window[cb] = (data) => {
+          cleanup();
+          resolve({ found: !!(data && data.organization), org: (data && data.organization) || null });
+        };
+
+        function cleanup() {
+          try { delete window[cb]; } catch {}
+          if (script && script.parentNode) script.parentNode.removeChild(script);
+        }
+
+        script.onerror = () => { cleanup(); reject(new Error("JSONP request failed")); };
+        script.src = url; // ProPublica JSONP supported. [2](https://www.irs.gov/businesses/employer-identification-number)
+        document.head.appendChild(script);
+      });
+    }
+
+    async function fetchOrg(ein) {
+      // Prefer fetch(); if blocked (CORS/network), fall back to JSONP.
+      try {
+        return await fetchOrgFetchApi(ein);
+      } catch (e) {
+        return await fetchOrgJsonp(ein);
+      }
+    }
+
+    // ---------------------------
+    // Decision logic
+    // ---------------------------
+    function decide(claimedType, found, subsection) {
+      // Returns: { pass: boolean, warning: boolean, reason: string }
+      if (claimedType === "other") {
+        return {
+          pass: true,
+          warning: true,
+          reason: "OTHER_ALWAYS_PASSES"
+        };
+      }
+
+      if (claimedType === "170c1") {
+        // Pass only if ProPublica returns no record for EIN (per your rule).
+        return {
+          pass: !found,
+          warning: false,
+          reason: (!found ? "NO_RECORD_MATCHES_170c1_RULE" : "FOUND_RECORD_SO_NOT_170c1_BY_RULE")
+        };
+      }
+
+      // For 501c3 and 501c1, require found record + matching subsection_code.
+      if (!found) {
+        return { pass: false, warning: false, reason: "NOT_FOUND" };
+      }
+
+      if (claimedType === "501c3") {
+        return { pass: (subsection === 3), warning: false, reason: (subsection === 3 ? "MATCH_501c3" : "SUBSECTION_MISMATCH") };
+      }
+
+      if (claimedType === "501c1") {
+        return { pass: (subsection === 1), warning: false, reason: (subsection === 1 ? "MATCH_501c1" : "SUBSECTION_MISMATCH") };
+      }
+
+      return { pass: false, warning: false, reason: "UNKNOWN_CLAIMED_TYPE" };
+    }
+
+    function claimedLabel(claimedType) {
+      if (claimedType === "501c3") return "501(c)(3)";
+      if (claimedType === "501c1") return "501(c)(1)";
+      if (claimedType === "170c1") return "IRC §170(c)(1) Government entity";
+      return "Other";
+    }
+
+    // ---------------------------
+    // Main validate handler
+    // ---------------------------
+    async function validate() {
+      const claimedType = getClaimedType();
+      const ein = normalizeEin($ein.value);
+
+      last.claimedType = claimedType;
+      last.ein = ein;
+      last.checkedAt = new Date().toISOString();
+
+      if (ein.length !== 9) {
+        last.result = "FAIL";
+        lastValid = false;
+        last.propublicaFound = null;
+        last.subsection_code = null;
+        last.organizationName = null;
+        last.warning = false;
+        last.message = "EIN must be exactly 9 digits.";
+
+        setStatus("bad", "FAIL — Invalid EIN format", "Please enter a 9-digit EIN (digits only).");
+        publishToJotform();
+        return;
+      }
+
+      setStatus("", "Checking…", "Contacting ProPublica Nonprofit Explorer API…");
+      publishToJotform();
+
+      let found = false, org = null;
+
+      try {
+        const res = await fetchOrg(ein);
+        found = res.found;
+        org = res.org;
+      } catch (e) {
+        // If API errors, treat as FAIL (except "other" which still passes with warning)
+        const d = decide(claimedType, false, null);
+        last.propublicaFound = null;
+        last.subsection_code = null;
+        last.organizationName = null;
+        last.warning = (claimedType === "other");
+        last.result = d.pass ? "PASS" : "FAIL";
+        lastValid = d.pass;
+        last.message = "Could not validate EIN due to an API/network error.";
+
+        const detail = (claimedType === "other")
+          ? (WARNING_TEXT + "\n\n(Validation unavailable due to API/network error.)")
+          : "Validation could not be completed. Please try again later or select Other with documentation.";
+
+        setStatus(lastValid ? "warn" : "bad",
+          (lastValid ? "PASS (Other) — Validation unavailable" : "FAIL — Validation unavailable"),
+          detail
+        );
+
+        publishToJotform();
+        return;
+      }
+
+      // Extract fields (org object includes subsection_code, name, etc.) [2](https://www.irs.gov/businesses/employer-identification-number)
+      const subsection = (org && typeof org.subsection_code === "number") ? org.subsection_code : null;
+      const orgName = (org && org.name) ? String(org.name) : null;
+
+      last.propublicaFound = found;
+      last.subsection_code = subsection;
+      last.organizationName = orgName;
+
+      const d = decide(claimedType, found, subsection);
+
+      last.result = d.pass ? "PASS" : "FAIL";
+      last.warning = d.warning;
+      lastValid = d.pass; // This is what will allow/block submission via sendSubmit. [1](https://nonprofit-open-data-collective.github.io/propublica-api/)
+
+      // Build user-facing message
+      if (d.pass && claimedType === "other") {
+        last.message = "PASS (Other) — Additional documentation may be necessary.";
+        setStatus(
+          "warn",
+          "PASS — Other selected (Documentation may be required)",
+          WARNING_TEXT
+        );
+      } else if (d.pass) {
+        last.message = "PASS — Selection matches validation result.";
+        const detailLines = [];
+        detailLines.push(`Selected: ${claimedLabel(claimedType)}`);
+        detailLines.push(found ? `ProPublica: Found organization${orgName ? " (" + orgName + ")" : ""}` : "ProPublica: No organization record found");
+        if (found) detailLines.push(`ProPublica subsection_code: ${subsection}`);
+        setStatus("ok", "PASS — Verified", detailLines.join("\n"));
+      } else {
+        last.message = "FAIL — Selection does not match validation result.";
+        const detailLines = [];
+        detailLines.push(`Selected: ${claimedLabel(claimedType)}`);
+        detailLines.push(found ? `ProPublica: Found organization${orgName ? " (" + orgName + ")" : ""}` : "ProPublica: No organization record found");
+        if (found) detailLines.push(`ProPublica subsection_code: ${subsection}`);
+        detailLines.push("");
+        detailLines.push("Please correct the selection and re-validate.");
+        detailLines.push("If you cannot match the category, select Other and attach documentation.");
+
+        setStatus("bad", "FAIL — Not verified", detailLines.join("\n"));
+      }
+
+      publishToJotform();
+    }
+
+    // ---------------------------
+    // Jotform lifecycle hooks
+    // ---------------------------
+    JFCustomWidget.subscribe("ready", function(data) {
+      // Restore previous state if editing a submission. 'data.value' contains saved widget value. [1](https://nonprofit-open-data-collective.github.io/propublica-api/)
+      if (data && data.value) {
+        try {
+          const prev = JSON.parse(data.value);
+          if (prev && typeof prev === "object") {
+            last = Object.assign(last, prev);
+            $ein.value = last.ein || "";
+            if (last.claimedType) {
+              const r = document.querySelector(`input[name="orgType"][value="${last.claimedType}"]`);
+              if (r) r.checked = true;
+            }
+            lastValid = (last.result === "PASS");
+            // Show previous status
+            if (last.result === "PASS" && last.warning) {
+              setStatus("warn", "PASS — Other selected (Documentation may be required)", WARNING_TEXT);
+            } else if (last.result === "PASS") {
+              setStatus("ok", "PASS — Verified", "Previously validated.");
+            } else if (last.result === "FAIL") {
+              setStatus("bad", "FAIL — Not verified", "Previously failed validation. Please re-check.");
+            } else {
+              setStatus("", "Not validated yet.", "");
+            }
+          }
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      // Events
+      $btn.addEventListener("click", validate);
+      $ein.addEventListener("keydown", (e) => { if (e.key === "Enter") validate(); });
+
+      // If they change org type, invalidate until re-validated (safer)
+      document.querySelectorAll('input[name="orgType"]').forEach(r => {
+        r.addEventListener("change", () => {
+          last.claimedType = getClaimedType();
+          last.result = "NOT_CHECKED";
+          lastValid = false;
+          setStatus("", "Changed selection — please validate again.", "");
+          publishToJotform();
+        });
+      });
+
+      tryResize();
+    });
+
+    JFCustomWidget.subscribe("submit", function() {
+      // Enforce required logic: valid must be true to pass required. [1](https://nonprofit-open-data-collective.github.io/propublica-api/)
+      JFCustomWidget.sendSubmit({
+        valid: !!lastValid,
+        value: JSON.stringify(last)
+      });
+    });
+  </script>
+</body>
+</html>
