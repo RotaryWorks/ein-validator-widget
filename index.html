@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>EIN Eligibility Validator (Jotform Widget)</title>
 
-  <!-- Jotform Custom Widget API loader -->
+  <!-- Jotform Custom Widget API (correct, non-self-closing) -->
  <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script> <!-- [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html) -->
 
   <style>
@@ -87,7 +87,7 @@
   </div>
 
   <script>
-    // ProPublica Nonprofit Explorer API v2 supports JSONP via a callback parameter. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+    // ProPublica Nonprofit Explorer API v2 docs say JSONP is supported via callback parameter. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
     const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2";
 
     const OTHER_WARNING =
@@ -119,6 +119,7 @@
 
     let isValidForSubmit = false;
 
+    // ---- helpers ----
     function normalizeEin(raw) {
       return String(raw || "").replace(/\D/g, "").slice(0, 9);
     }
@@ -133,70 +134,13 @@
     }
 
     function resizeToContent() {
-      // Resizing is supported in the custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+      // Jotform widget API supports resize requests. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
       try { JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight }); } catch {}
     }
 
     function sendLiveData() {
-      // sendData is part of the custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+      // Jotform widget API supports sendData for live updates. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
       try { JFCustomWidget.sendData({ value: JSON.stringify(state) }); } catch {}
-    }
-
-    // JSONP helper:
-    // We generate a callback function name and pass it as callback=NAME. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
-    function jsonp(url, timeoutMs = 12000) {
-      return new Promise((resolve, reject) => {
-        const cbName = "pp_cb_" + Math.random().toString(36).slice(2);
-        const script = document.createElement("script");
-
-        const timer = setTimeout(() => {
-          cleanup();
-          reject(new Error("JSONP timeout"));
-        }, timeoutMs);
-
-        function cleanup() {
-          clearTimeout(timer);
-          try { delete window[cbName]; } catch {}
-          if (script.parentNode) script.parentNode.removeChild(script);
-        }
-
-        window[cbName] = (data) => {
-          cleanup();
-          resolve(data);
-        };
-
-        script.onerror = () => {
-          cleanup();
-          reject(new Error("JSONP script load failed (blocked or network error)"));
-        };
-
-        const sep = url.includes("?") ? "&" : "?";
-        script.src = url + sep + "callback=" + encodeURIComponent(cbName);
-        console.log("JSONP URL:", script.src)
-        document.head.appendChild(script);
-      });
-    }
-
-    async function fetchOrganizationJsonp(einDigits) {
-      // Organization endpoint (JSON/JSONP described by ProPublica docs). [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
-      const url = `${PROPUBLICA_BASE}/organizations/${einDigits}.json`;
-
-      // Use JSONP so we avoid CORS.
-      const data = await jsonp(url);
-
-      // When ProPublica returns an org record, it is under "organization" per docs. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
-      const org = data && data.organization ? data.organization : null;
-
-      return { found: !!org, org };
-    }
-
-    function decide(claimedType, found, subsection) {
-      if (claimedType === "other") return { pass: true, warn: true };
-      if (claimedType === "170c1") return { pass: !found, warn: false };
-      if (!found) return { pass: false, warn: false };
-      if (claimedType === "501c3") return { pass: (subsection === 3), warn: false };
-      if (claimedType === "501c1") return { pass: (subsection === 1), warn: false };
-      return { pass: false, warn: false };
     }
 
     function render() {
@@ -231,6 +175,61 @@
       }
 
       resizeToContent();
+    }
+
+    function decide(claimedType, found, subsection) {
+      if (claimedType === "other") return { pass: true, warn: true };
+      if (claimedType === "170c1") return { pass: !found, warn: false };
+      if (!found) return { pass: false, warn: false };
+      if (claimedType === "501c3") return { pass: (subsection === 3), warn: false };
+      if (claimedType === "501c1") return { pass: (subsection === 1), warn: false };
+      return { pass: false, warn: false };
+    }
+
+    // ---- JSONP with STATIC callback() and ?callback (no equals) ----
+    // ProPublica docs: JSONP available by passing callback param. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+    function propublicaJsonpOrg(einDigits, timeoutMs = 12000) {
+      return new Promise((resolve, reject) => {
+        // Ensure no concurrent validation runs
+        // We'll disable the button before calling this; still guard with a token.
+        const token = Math.random().toString(36).slice(2);
+        propublicaJsonpOrg._token = token;
+
+        const script = document.createElement("script");
+        const baseUrl = `${PROPUBLICA_BASE}/organizations/${einDigits}.json`;
+
+        // The key trick: add `?callback` (no =value)
+        // You confirmed that works in your manual testing.
+        const sep = baseUrl.includes("?") ? "&" : "?";
+        script.src = baseUrl + sep + "callback";
+
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error("JSONP timeout"));
+        }, timeoutMs);
+
+        function cleanup() {
+          clearTimeout(timer);
+          // Remove global callback handler
+          try { delete window.callback; } catch {}
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+
+        // ProPublica returns: callback(<json>) when `?callback` is present
+        window.callback = (data) => {
+          // Ignore stale responses
+          if (propublicaJsonpOrg._token !== token) return;
+          cleanup();
+          resolve(data);
+        };
+
+        script.onerror = () => {
+          cleanup();
+          reject(new Error("JSONP script load failed (blocked or network error)"));
+        };
+
+        document.head.appendChild(script);
+      });
     }
 
     async function validate() {
@@ -274,15 +273,18 @@
       resizeToContent();
 
       try {
-        const res = await fetchOrganizationJsonp(einDigits);
-        state.propublica_found = res.found;
+        const data = await propublicaJsonpOrg(einDigits);
 
-        const org = res.org;
+        const org = data && data.organization ? data.organization : null;
+        const found = !!org;
+
+        state.propublica_found = found;
         state.organization_name = org?.name ? String(org.name) : null;
         state.subsection_code = (typeof org?.subsection_code === "number") ? org.subsection_code : null;
 
-        const d = decide(claimed, res.found, state.subsection_code);
+        const d = decide(claimed, found, state.subsection_code);
         state.status = d.pass ? "PASS" : "FAIL";
+        state.warning = (claimed === "other"); // (handled earlier, but safe)
         isValidForSubmit = d.pass;
 
         if (claimed === "170c1") {
@@ -292,7 +294,7 @@
         } else {
           state.message = d.pass
             ? "Selection matches classification."
-            : (res.found ? "EIN found, but does not match the selected type." : "No organization record found for this EIN.");
+            : (found ? "EIN found, but does not match the selected type." : "No organization record found for this EIN.");
         }
       } catch (e) {
         state.status = "FAIL";
@@ -305,7 +307,9 @@
       }
     }
 
+    // UI events
     $btn.addEventListener("click", validate);
+
     $ein.addEventListener("input", () => {
       const digits = normalizeEin($ein.value);
       if (digits.length > 9) $ein.value = digits.slice(0, 9);
@@ -316,6 +320,7 @@
       isValidForSubmit = false;
       render(); sendLiveData();
     });
+
     $type.addEventListener("change", () => {
       state.status = "NOT VALIDATED";
       state.message = "";
@@ -324,7 +329,7 @@
       render(); sendLiveData();
     });
 
-    // Jotform lifecycle hooks: ready/submit are part of custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+    // Jotform lifecycle hooks (ready/submit) are part of custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
     JFCustomWidget.subscribe("ready", function(data) {
       if (data && data.value) {
         try {
@@ -350,6 +355,9 @@
         value: JSON.stringify(state)
       });
     });
+
+    // Initial render
+    render();
   </script>
 </body>
 </html>
