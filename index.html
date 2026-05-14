@@ -172,6 +172,7 @@
 
         const sep = url.includes("?") ? "&" : "?";
         script.src = url + sep + "callback=" + encodeURIComponent(cbName);
+        console.log("JSONP URL:", script.src)
         document.head.appendChild(script);
       });
     }
