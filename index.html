@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>EIN Validator (Debuggable)</title>
+  <title>EIN Validator (Debuggable JSONP)</title>
 
-  <!-- Jotform Custom Widget API (correct tag; must not be self-closing) -->
+  <!-- Jotform Custom Widget API (required when used as a Jotform widget) -->
   <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
 
   <style>
@@ -30,21 +30,43 @@
     }
     button.primary{ background:#1f6feb; border-color:#1f6feb; color:#fff; }
     button:disabled{ opacity:.6; cursor:not-allowed; }
+
     .hint{ color:var(--muted); font-size:12px; margin-top:6px; }
+    .mono{ font-family: ui-monospace, Menlo, Consolas, monospace; }
+
     .badge{
       display:inline-block; padding:6px 10px; border-radius:999px;
       font-weight:700; border:1px solid transparent;
     }
     .badge.ok{ color:var(--ok); border-color: rgba(16,124,16,.35); background: rgba(16,124,16,.08); }
     .badge.bad{ color:var(--bad); border-color: rgba(168,0,0,.35); background: rgba(168,0,0,.08); }
+    .badge.warn{ color:var(--warn); border-color: rgba(138,109,59,.35); background: rgba(138,109,59,.12); }
     .badge.neutral{ color:#333; border-color: rgba(0,0,0,.15); background: rgba(0,0,0,.04); }
+
     .details{ white-space:pre-wrap; font-size:13px; margin-top:10px; }
-    .debugPanel{
-      margin-top:12px; padding:10px; border:1px dashed #999; border-radius:10px;
-      font-family: ui-monospace, Menlo, Consolas, monospace;
-      font-size:12px; white-space:pre-wrap; max-height:320px; overflow:auto; display:none;
+
+    .warnBox{
+      margin-top:10px;
+      border:1px solid rgba(138,109,59,.35);
+      background: rgba(138,109,59,.12);
+      border-radius:10px;
+      padding:10px;
+      color:#5a4a1b;
+      display:none;
     }
-    .mono{ font-family: ui-monospace, Menlo, Consolas, monospace; }
+
+    .debugPanel{
+      margin-top:12px;
+      padding:10px;
+      border:1px dashed #999;
+      border-radius:10px;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size:12px;
+      white-space:pre-wrap;
+      max-height:340px;
+      overflow:auto;
+      display:none;
+    }
   </style>
 </head>
 
@@ -65,6 +87,7 @@
           <option value="170c1">170(c)(1) Government</option>
           <option value="other">Other</option>
         </select>
+        <div class="hint">Tip: Try debug mode with <span class="mono">?debug=1&dump=1&mode=named</span></div>
       </div>
 
       <div>
@@ -75,59 +98,72 @@
     <div style="margin-top:12px;">
       <span id="badge" class="badge neutral">NOT VALIDATED</span>
       <div id="details" class="details">Ready.</div>
+      <div id="warnBox" class="warnBox"></div>
       <div id="debugPanel" class="debugPanel"></div>
     </div>
   </div>
 
 <script>
-(function () {
-  // ProPublica API docs indicate JSONP is available by passing a callback parameter. 
+(() => {
+  "use strict";
+
+  // ProPublica Nonprofit Explorer API v2 base. JSONP is described as supported via a callback parameter. [1](https://github.com/mcbridek/jotform-autocomplete-v2/blob/main/README.md)
   const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2";
 
-  const qs = new URLSearchParams(location.search);
+  const qs = new URLSearchParams(window.location.search);
   const DEBUG = qs.get("debug") === "1";
-  const DUMP = qs.get("dump") === "1";
-  const MODE = (qs.get("mode") || "bare").toLowerCase();
-  // mode options:
-  //  - bare  => ?callback
-  //  - empty => ?callback=
-  //  - named => ?callback=ppcb12345
+  const DUMP  = qs.get("dump") === "1";
+  // mode: named | bare | empty
+  const MODE  = (qs.get("mode") || "named").toLowerCase();
 
+  const OTHER_WARNING =
+    "Your EIN did not Pass validation of eligibility. Additional documentation may be necessary. " +
+    "Please attach any relevant supplemental documents you have at the bottom of this application, " +
+    "or we may request additional documentation before funds are issued.";
+
+  // DOM
   const $ein = document.getElementById("ein");
   const $type = document.getElementById("orgType");
   const $btn = document.getElementById("validateBtn");
   const $badge = document.getElementById("badge");
   const $details = document.getElementById("details");
+  const $warn = document.getElementById("warnBox");
   const $debug = document.getElementById("debugPanel");
   const $einPretty = document.getElementById("einPretty");
 
-  let debugLines = [];
+  // Debug logger
+  const debugLines = [];
+  const safe = (o) => { try { return JSON.stringify(o); } catch { return String(o); } };
+
   function log(msg, obj) {
     if (!DEBUG) return;
-    const line = "[" + new Date().toISOString() + "] " + msg + (obj ? " | " + safe(obj) : "");
+    const line = `[${new Date().toISOString()}] ${msg}` + (obj ? ` | ${safe(obj)}` : "");
     debugLines.push(line);
-    if (debugLines.length > 160) debugLines.shift();
+    if (debugLines.length > 200) debugLines.shift();
     console.log(line);
     $debug.style.display = "block";
     $debug.textContent =
-      "DEBUG=1 dump=" + (DUMP ? "1" : "0") + " mode=" + MODE + "\n" +
-      "Origin=" + location.origin + "\n" +
-      "JFCustomWidget=" + (typeof window.JFCustomWidget) + "\n\n" +
+      `DEBUG=1 dump=${DUMP ? 1 : 0} mode=${MODE}\n` +
+      `Origin=${location.origin}\n` +
+      `JFCustomWidget=${typeof window.JFCustomWidget}\n\n` +
       debugLines.join("\n");
   }
-  function safe(o) {
-    try { return JSON.stringify(o); } catch (e) { return String(o); }
-  }
 
-  // Capture CSP violations if present
-  window.addEventListener("securitypolicyviolation", function(e) {
+  // Capture CSP violations (if any)
+  window.addEventListener("securitypolicyviolation", (e) => {
     log("CSP VIOLATION", { blockedURI: e.blockedURI, directive: e.effectiveDirective });
   });
 
-  function normalizeEin(raw) { return String(raw || "").replace(/\D/g, "").slice(0, 9); }
-  function prettyEin(d) { return (d.length === 9) ? (d.slice(0,2) + "-" + d.slice(2)) : "—"; }
-  function setBadge(kind, text) { $badge.className = "badge " + kind; $badge.textContent = text; }
+  // Helpers
+  const normalizeEin = (raw) => String(raw || "").replace(/\D/g, "").slice(0, 9);
+  const prettyEin = (d) => (d.length === 9) ? (d.slice(0,2) + "-" + d.slice(2)) : "—";
 
+  function setBadge(kind, text) {
+    $badge.className = "badge " + kind;
+    $badge.textContent = text;
+  }
+
+  // Decision logic (your original rules)
   function decide(type, found, subsection) {
     if (type === "other") return { pass: true, reason: "OTHER_ALWAYS_PASS" };
     if (type === "170c1") return { pass: !found, reason: (!found ? "NOT_FOUND_MATCH" : "FOUND_MISMATCH") };
@@ -137,26 +173,55 @@
     return { pass: false, reason: "UNKNOWN" };
   }
 
-  // JSONP loader (prints exact URL; prints JSON keys and preview if callback fires)
-  function jsonpOrg(einDigits, timeoutMs) {
-    timeoutMs = timeoutMs || 15000;
+  // Update UI warn box
+  function setWarning(show) {
+    if (show) {
+      $warn.style.display = "block";
+      $warn.textContent = OTHER_WARNING;
+    } else {
+      $warn.style.display = "none";
+      $warn.textContent = "";
+    }
+  }
 
-    return new Promise(function(resolve, reject) {
-      const baseUrl = PROPUBLICA_BASE + "/organizations/" + einDigits + ".json";
+  // Resize when in Jotform widget context
+  function resizeToContent() {
+    try {
+      if (window.JFCustomWidget) {
+        JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight });
+      }
+    } catch {}
+  }
+
+  // Send value back to Jotform if present
+  function sendToJotform(valueObj, validBool) {
+    try {
+      if (!window.JFCustomWidget) return;
+      JFCustomWidget.sendData({ value: JSON.stringify(valueObj) }); // [2](https://projects.propublica.org/nonprofits/)
+      // On submit we’ll sendSubmit; here we only keep value updated.
+    } catch {}
+  }
+
+  // JSONP loader:
+  // - named: callback=<cbName>
+  // - empty: callback=
+  // - bare : callback  (no equals)
+  function jsonpOrg(einDigits, timeoutMs = 15000) {
+    return new Promise((resolve, reject) => {
+      const baseUrl = `${PROPUBLICA_BASE}/organizations/${einDigits}.json`;
       const ts = Date.now();
       const cbName = "ppcb" + ts + Math.floor(Math.random() * 100000);
 
       let finalUrl;
       if (MODE === "named") {
-        finalUrl = baseUrl + "?callback=" + cbName + "&ts=" + ts;
+        finalUrl = `${baseUrl}?callback=${cbName}&ts=${ts}`;
       } else if (MODE === "empty") {
-        finalUrl = baseUrl + "?callback=&ts=" + ts;
+        finalUrl = `${baseUrl}?callback=&ts=${ts}`;
       } else {
-        // bare
-        finalUrl = baseUrl + "?callback&ts=" + ts;
+        finalUrl = `${baseUrl}?callback&ts=${ts}`;
       }
 
-      log("JSONP start", { finalUrl: finalUrl });
+      log("JSONP start", { finalUrl });
 
       const script = document.createElement("script");
       script.async = true;
@@ -167,60 +232,48 @@
 
       function cleanup() {
         done = true;
-        try { delete window[cbName]; } catch (e) {}
-        try { delete window.callback; } catch (e) {}
+        try { delete window[cbName]; } catch {}
+        try { delete window.callback; } catch {}
         if (script.parentNode) script.parentNode.removeChild(script);
       }
 
-      const timer = setTimeout(function() {
+      const timer = setTimeout(() => {
         if (done) return;
-        log("JSONP timeout", { ms: Math.round(performance.now() - start), finalUrl: finalUrl });
+        log("JSONP timeout", { ms: Math.round(performance.now() - start), finalUrl });
         cleanup();
         reject(new Error("JSONP timeout"));
       }, timeoutMs);
 
-      // Named callback handler
-      window[cbName] = function(data) {
+      // Named callback
+      window[cbName] = (data) => {
         if (done) return;
         clearTimeout(timer);
         log("JSONP callback fired (named)", { ms: Math.round(performance.now() - start) });
         if (DUMP) {
-          try {
-            log("JSON keys", Object.keys(data || {}));
-            log("JSON preview", String(JSON.stringify(data)).slice(0, 1200));
-          } catch (e) {
-            log("JSON dump failed", { err: String(e) });
-          }
+          log("JSON keys", Object.keys(data || {}));
+          log("JSON preview", String(JSON.stringify(data)).slice(0, 1200));
         }
         cleanup();
         resolve(data);
       };
 
-      // Bare callback handler (if ProPublica uses a default global callback name)
-      window.callback = function(data) {
+      // Bare callback handler (if the server uses a default global function name)
+      window.callback = (data) => {
         if (done) return;
         clearTimeout(timer);
         log("JSONP callback fired (bare->callback)", { ms: Math.round(performance.now() - start) });
         if (DUMP) {
-          try {
-            log("JSON keys", Object.keys(data || {}));
-            log("JSON preview", String(JSON.stringify(data)).slice(0, 1200));
-          } catch (e) {
-            log("JSON dump failed", { err: String(e) });
-          }
+          log("JSON keys", Object.keys(data || {}));
+          log("JSON preview", String(JSON.stringify(data)).slice(0, 1200));
         }
         cleanup();
         resolve(data);
       };
 
-      script.onload = function() {
-        log("JSONP script onload", { ms: Math.round(performance.now() - start) });
-        // If the payload isn't executable JS that calls the callback, we will still timeout.
-      };
-
-      script.onerror = function() {
+      script.onload = () => log("JSONP script onload", { ms: Math.round(performance.now() - start), finalUrl });
+      script.onerror = () => {
         clearTimeout(timer);
-        log("JSONP script onerror", { ms: Math.round(performance.now() - start), finalUrl: finalUrl });
+        log("JSONP script onerror", { ms: Math.round(performance.now() - start), finalUrl });
         cleanup();
         reject(new Error("JSONP script load failed (blocked or network error)"));
       };
@@ -229,53 +282,93 @@
     });
   }
 
+  // Main validate click handler
   async function validate() {
-    const einDigits = normalizeEin($ein.value);
-    const claimed = $type.value;
-    $einPretty.textContent = prettyEin(einDigits);
-
-    if (einDigits.length !== 9) {
-      setBadge("bad", "FAIL");
-      $details.textContent = "EIN must be exactly 9 digits.";
-      return;
-    }
-
-    if (claimed === "other") {
-      setBadge("neutral", "PASS (Other)");
-      $details.textContent = "Other selected (passes). Documentation may be required.";
-      return;
-    }
-
-    setBadge("neutral", "CHECKING…");
-    $btn.disabled = true;
-
     try {
-      const data = await jsonpOrg(einDigits, 15000);
+      const einDigits = normalizeEin($ein.value);
+      const claimed = $type.value;
 
-      const org = data && data.organization ? data.organization : null;
+      $einPretty.textContent = prettyEin(einDigits);
+      setWarning(false);
+
+      if (einDigits.length !== 9) {
+        setBadge("bad", "FAIL");
+        $details.textContent = "EIN must be exactly 9 digits.";
+        return;
+      }
+
+      if (claimed === "other") {
+        setBadge("warn", "PASS (Other)");
+        setWarning(true);
+        $details.textContent = "Other selected (passes). Documentation may be required.";
+        return;
+      }
+
+      setBadge("neutral", "CHECKING…");
+      $btn.disabled = true;
+
+      const data = await jsonpOrg(einDigits);
+      const org = (data && data.organization) ? data.organization : null;
+
       const found = !!org;
-      const subsection = org && typeof org.subsection_code === "number" ? org.subsection_code : null;
-      const name = org && org.name ? String(org.name) : "";
+      const subsection = (org && typeof org.subsection_code === "number") ? org.subsection_code : null;
+      const name = (org && org.name) ? String(org.name) : "";
 
       const d = decide(claimed, found, subsection);
 
       setBadge(d.pass ? "ok" : "bad", d.pass ? "PASS" : "FAIL");
       $details.textContent =
-        "Found: " + found + "\n" +
-        "Name: " + name + "\n" +
-        "subsection_code: " + subsection + "\n" +
-        "Decision: " + d.reason;
+        `Found: ${found}\n` +
+        `Name: ${name}\n` +
+        `subsection_code: ${subsection}\n` +
+        `Decision: ${d.reason}`;
+
+      // Push result to Jotform value if in widget context
+      const payload = {
+        ein: einDigits,
+        claimed_type: claimed,
+        found,
+        name,
+        subsection_code: subsection,
+        pass: d.pass,
+        decision: d.reason,
+        checked_at: new Date().toISOString(),
+        mode: MODE
+      };
+      sendToJotform(payload, d.pass);
 
     } catch (e) {
       setBadge("bad", "FAIL");
-      $details.textContent = "Debug: " + String(e.message || e);
+      $details.textContent = "Debug: " + String(e && e.message ? e.message : e);
       log("VALIDATE failed", { err: String(e) });
     } finally {
       $btn.disabled = false;
+      resizeToContent();
     }
   }
 
+  // Wire events
   $btn.addEventListener("click", validate);
+
+  $ein.addEventListener("input", () => {
+    const d = normalizeEin($ein.value);
+    if (d.length > 9) $ein.value = d.slice(0, 9);
+    $einPretty.textContent = prettyEin(normalizeEin($ein.value));
+  });
+
+  // Jotform lifecycle hooks (only run if JFCustomWidget exists) [2](https://projects.propublica.org/nonprofits/)
+  if (window.JFCustomWidget) {
+    JFCustomWidget.subscribe("ready", () => {
+      log("JFCustomWidget ready");
+      resizeToContent();
+    });
+
+    JFCustomWidget.subscribe("submit", () => {
+      // If you set this widget field Required in Jotform, you can enforce pass/fail here later.
+      // For now we allow submission; you can wire strict validation once JSONP works reliably.
+      JFCustomWidget.sendSubmit({ valid: true, value: "" });
+    });
+  }
 
   if (DEBUG) log("Loaded");
 })();
