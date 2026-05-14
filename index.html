@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>EIN Eligibility Validator (Jotform Widget)</title>
 
-  <!-- Correct Jotform Custom Widget API loader (required for JFCustomWidget.*) -->
-  <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script> <!-- [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html) -->
+  <!-- Jotform Custom Widget API loader -->
+  <script src="https://js.jotform.com/JotFormCustomWidget.min.js [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html) -->
 
   <style>
     :root{
@@ -71,9 +71,7 @@
           <option value="170c1">Government entity under IRC §170(c)(1)</option>
           <option value="other">Other</option>
         </select>
-        <div class="hint">
-          Note: “Other” always passes, but shows a documentation note.
-        </div>
+        <div class="hint">“Other” always passes, but shows a documentation note.</div>
       </div>
 
       <div style="padding-top:18px;">
@@ -89,14 +87,13 @@
   </div>
 
   <script>
-    // ProPublica Nonprofit Explorer API v2 base URL and org endpoint usage is documented. [2](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+    // ProPublica Nonprofit Explorer API v2 supports JSONP via a callback parameter. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
     const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2";
 
-    // Your requested “Other” warning (kept as-is, including original spelling).
     const OTHER_WARNING =
-      "Your EIN did not Pass validation of eligibility.  Additional documentation may be necessary. " +
-      "Please attach any relevant supplemental docunments you have at the bottom of this application, " +
-      "or we may request addional documentation before funds are issued.";
+      "Your EIN did not Pass validation of eligibility. Additional documentation may be necessary. " +
+      "Please attach any relevant supplemental documents you have at the bottom of this application, " +
+      "or we may request additional documentation before funds are issued.";
 
     const $ein = document.getElementById("ein");
     const $einPretty = document.getElementById("einPretty");
@@ -106,22 +103,20 @@
     const $details = document.getElementById("details");
     const $warn = document.getElementById("warnBox");
 
-    // What we store in the widget value (Jotform stores strings; we store JSON string). [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
     let state = {
       ein: "",
       ein_pretty: "",
       claimed_type: "501c3",
       status: "NOT_VALIDATED",       // PASS | FAIL | NOT_VALIDATED
-      propublica_found: null,        // true | false | null
-      subsection_code: null,         // number | null
-      organization_name: null,       // string | null
-      warning: false,               // boolean
+      propublica_found: null,
+      subsection_code: null,
+      organization_name: null,
+      warning: false,
       message: "",
-      checked_at: null,             // ISO string
-      debug: ""                     // string (captures HTTP errors for troubleshooting)
+      checked_at: null,
+      debug: ""
     };
 
-    // Jotform “required” validation uses this boolean at submit time. [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
     let isValidForSubmit = false;
 
     function normalizeEin(raw) {
@@ -138,79 +133,91 @@
     }
 
     function resizeToContent() {
-      // Optional but improves appearance inside Jotform. [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+      // Resizing is supported in the custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
       try { JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight }); } catch {}
     }
 
     function sendLiveData() {
-      // sendData updates the widget value during interaction. [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+      // sendData is part of the custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
       try { JFCustomWidget.sendData({ value: JSON.stringify(state) }); } catch {}
     }
 
-    async function fetchOrganization(einDigits) {
-      // ProPublica org endpoint: GET /organizations/:ein.json [2](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+    // JSONP helper:
+    // We generate a callback function name and pass it as callback=NAME. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+    function jsonp(url, timeoutMs = 12000) {
+      return new Promise((resolve, reject) => {
+        const cbName = "pp_cb_" + Math.random().toString(36).slice(2);
+        const script = document.createElement("script");
+
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error("JSONP timeout"));
+        }, timeoutMs);
+
+        function cleanup() {
+          clearTimeout(timer);
+          try { delete window[cbName]; } catch {}
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+
+        window[cbName] = (data) => {
+          cleanup();
+          resolve(data);
+        };
+
+        script.onerror = () => {
+          cleanup();
+          reject(new Error("JSONP script load failed (blocked or network error)"));
+        };
+
+        const sep = url.includes("?") ? "&" : "?";
+        script.src = url + sep + "callback=" + encodeURIComponent(cbName);
+        document.head.appendChild(script);
+      });
+    }
+
+    async function fetchOrganizationJsonp(einDigits) {
+      // Organization endpoint (JSON/JSONP described by ProPublica docs). [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
       const url = `${PROPUBLICA_BASE}/organizations/${einDigits}.json`;
 
-      const resp = await fetch(url, { method: "GET" }); // API uses GET requests [2](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+      // Use JSONP so we avoid CORS.
+      const data = await jsonp(url);
 
-      if (resp.status === 404) return { found: false, org: null, debug: "HTTP 404 (not found)" };
+      // When ProPublica returns an org record, it is under "organization" per docs. [1](https://www.youtube.com/watch?v=7DAa8L4pkcg)
+      const org = data && data.organization ? data.organization : null;
 
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => "");
-        return { found: false, org: null, debug: `HTTP ${resp.status} ${body}`.trim() };
-      }
-
-      const data = await resp.json();
-      return { found: !!data.organization, org: data.organization || null, debug: "OK" };
+      return { found: !!org, org };
     }
 
     function decide(claimedType, found, subsection) {
-      // Your rules:
-      // - other: PASS + warning
-      // - 170c1: PASS if NOT found
-      // - 501c3: PASS if found AND subsection_code == 3
-      // - 501c1: PASS if found AND subsection_code == 1
-      if (claimedType === "other") return { pass: true, warn: true, reason: "OTHER_ALWAYS_PASS" };
-      if (claimedType === "170c1") return { pass: !found, warn: false, reason: (!found ? "NOT_FOUND_MATCH_170C1_RULE" : "FOUND_CONFLICTS_170C1_RULE") };
-      if (!found) return { pass: false, warn: false, reason: "NOT_FOUND" };
-      if (claimedType === "501c3") return { pass: (subsection === 3), warn: false, reason: (subsection === 3 ? "MATCH_501C3" : "SUBSECTION_MISMATCH") };
-      if (claimedType === "501c1") return { pass: (subsection === 1), warn: false, reason: (subsection === 1 ? "MATCH_501C1" : "SUBSECTION_MISMATCH") };
-      return { pass: false, warn: false, reason: "UNKNOWN_SELECTION" };
+      if (claimedType === "other") return { pass: true, warn: true };
+      if (claimedType === "170c1") return { pass: !found, warn: false };
+      if (!found) return { pass: false, warn: false };
+      if (claimedType === "501c3") return { pass: (subsection === 3), warn: false };
+      if (claimedType === "501c1") return { pass: (subsection === 1), warn: false };
+      return { pass: false, warn: false };
     }
 
     function render() {
-      if (state.status === "PASS" && state.warning) {
-        setBadge("warn", "PASS (Other) — Documentation may be required");
-      } else if (state.status === "PASS") {
-        setBadge("ok", "PASS — Verified");
-      } else if (state.status === "FAIL") {
-        setBadge("bad", "FAIL — Not verified");
-      } else {
-        setBadge("neutral", "NOT VALIDATED");
-      }
+      if (state.status === "PASS" && state.warning) setBadge("warn", "PASS (Other) — Documentation may be required");
+      else if (state.status === "PASS") setBadge("ok", "PASS — Verified");
+      else if (state.status === "FAIL") setBadge("bad", "FAIL — Not verified");
+      else setBadge("neutral", "NOT VALIDATED");
 
       const lines = [];
       lines.push(`EIN: ${state.ein_pretty} (${state.ein || "—"})`);
       lines.push(`Selected Type: ${state.claimed_type}`);
+
       if (state.propublica_found === true) {
-        lines.push("ProPublica: Found organization");
+        lines.push("Lookup: Found organization");
         if (state.organization_name) lines.push(`Name: ${state.organization_name}`);
         if (typeof state.subsection_code === "number") lines.push(`subsection_code: ${state.subsection_code}`);
       } else if (state.propublica_found === false) {
-        lines.push("ProPublica: No organization record found");
-      } else {
-        lines.push("ProPublica: (not checked)");
+        lines.push("Lookup: No organization record found");
       }
 
-      if (state.message) {
-        lines.push("");
-        lines.push(`Summary: ${state.message}`);
-      }
-
-      if (state.debug) {
-        lines.push("");
-        lines.push(`Debug: ${state.debug}`);
-      }
+      if (state.message) { lines.push(""); lines.push(`Summary: ${state.message}`); }
+      if (state.debug)   { lines.push(""); lines.push(`Debug: ${state.debug}`); }
 
       $details.textContent = lines.join("\n");
 
@@ -242,39 +249,32 @@
 
       $einPretty.textContent = state.ein_pretty;
 
-      // Basic EIN format check
       if (einDigits.length !== 9) {
         state.status = "FAIL";
         state.message = "EIN must be exactly 9 digits (numbers only).";
         isValidForSubmit = false;
-        render();
-        sendLiveData();
+        render(); sendLiveData();
         return;
       }
 
-      // Other: pass with warning; no API call
       if (claimed === "other") {
         state.status = "PASS";
         state.warning = true;
         state.message = "Other selected. Additional documentation may be necessary.";
-        isValidForSubmit = true; // passes required validation
-        render();
-        sendLiveData();
+        isValidForSubmit = true;
+        render(); sendLiveData();
         return;
       }
 
-      // Call ProPublica (JSON only, no callback param)
       $btn.disabled = true;
       setBadge("neutral", "CHECKING…");
-      $details.textContent = "Checking ProPublica…";
+      $details.textContent = "Checking ProPublica (JSONP)…";
       $warn.style.display = "none";
       resizeToContent();
 
       try {
-        const res = await fetchOrganization(einDigits);
-
+        const res = await fetchOrganizationJsonp(einDigits);
         state.propublica_found = res.found;
-        state.debug = res.debug;
 
         const org = res.org;
         state.organization_name = org?.name ? String(org.name) : null;
@@ -286,14 +286,13 @@
 
         if (claimed === "170c1") {
           state.message = d.pass
-            ? "No ProPublica organization record found (passes 170(c)(1) rule)."
-            : "ProPublica found an exempt organization record (fails 170(c)(1) rule).";
+            ? "No organization record found (passes 170(c)(1) rule)."
+            : "Found an exempt organization record (fails 170(c)(1) rule).";
         } else {
           state.message = d.pass
-            ? "Selection matches ProPublica classification."
-            : (res.found ? "EIN found, but does not match the selected type." : "No ProPublica organization record found for this EIN.");
+            ? "Selection matches classification."
+            : (res.found ? "EIN found, but does not match the selected type." : "No organization record found for this EIN.");
         }
-
       } catch (e) {
         state.status = "FAIL";
         state.message = "Validation failed due to a network/API error.";
@@ -301,66 +300,50 @@
         isValidForSubmit = false;
       } finally {
         $btn.disabled = false;
-        render();
-        sendLiveData();
+        render(); sendLiveData();
       }
     }
 
-    // UI events
     $btn.addEventListener("click", validate);
-
     $ein.addEventListener("input", () => {
       const digits = normalizeEin($ein.value);
       if (digits.length > 9) $ein.value = digits.slice(0, 9);
       $einPretty.textContent = formatEinPretty(normalizeEin($ein.value));
-
-      // Any input change invalidates previous validation
       state.status = "NOT VALIDATED";
       state.message = "";
       state.debug = "";
       isValidForSubmit = false;
-      render();
-      sendLiveData();
+      render(); sendLiveData();
     });
-
     $type.addEventListener("change", () => {
-      // Any type change invalidates previous validation
       state.status = "NOT VALIDATED";
       state.message = "";
       state.debug = "";
       isValidForSubmit = false;
-      render();
-      sendLiveData();
+      render(); sendLiveData();
     });
 
-    // Jotform widget lifecycle hooks [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+    // Jotform lifecycle hooks: ready/submit are part of custom widget API. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
     JFCustomWidget.subscribe("ready", function(data) {
-      // Restore previous value when editing a submission [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
       if (data && data.value) {
         try {
           const prev = JSON.parse(data.value);
           if (prev && typeof prev === "object") {
             state = Object.assign(state, prev);
-
             $ein.value = state.ein || "";
             $einPretty.textContent = state.ein_pretty || formatEinPretty(state.ein);
-
             if (state.claimed_type) $type.value = state.claimed_type;
-
-            // PASS means valid; Other is also PASS
             isValidForSubmit = (state.status === "PASS");
             render();
           }
-        } catch {
-          // ignore parse errors
-        }
+        } catch {}
       }
       resizeToContent();
       sendLiveData();
     });
 
     JFCustomWidget.subscribe("submit", function() {
-      // sendSubmit controls required validation (valid must be true) [1](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
+      // sendSubmit controls required validation. [2](https://www.floik.com/gallery/jotform/How-To-Set-A-Condition-On-Jotform-d.html)
       JFCustomWidget.sendSubmit({
         valid: !!isValidForSubmit,
         value: JSON.stringify(state)
