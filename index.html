@@ -56,7 +56,7 @@
           <option value="170c1">170(c)(1) Government</option>
           <option value="other">Other</option>
         </select>
-        <div class="hint">Debug URL example: <span class="mono">?debug=1&jsonpMode=bare&forceMode=1&dump=1</span></div>
+        <div class="hint">Debug URL example: <span class="mono">?debug=1&dump=1</span></div>
       </div>
 
       <div>
@@ -75,125 +75,69 @@
 (() => {
   "use strict";
 
-  // ProPublica API docs indicate JSONP is available by passing a callback parameter. [4](https://sqps.onstreamsecure.com/origin/irsvideoportal/prod/1606-eng-Transcript_1.pdf)
+  // ProPublica Nonprofit Explorer does NOT send CORS headers, so fetch() is blocked.
+  // JSONP is the correct approach — but it requires a NAMED callback parameter,
+  // e.g. ?callback=myFn so the server wraps the JSON: myFn({...})
+  // Bare (?callback) or empty (?callback=) do not work.
   const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2";
 
-  const qs = new URLSearchParams(location.search);
+  const qs    = new URLSearchParams(location.search);
   const DEBUG = qs.get("debug") === "1";
-  const DUMP  = qs.get("dump") === "1";
+  const DUMP  = qs.get("dump")  === "1";
 
-  // Accept both parameter names so we can't get “wrong variable name” bugs:
-  const modeParam = (qs.get("mode") || qs.get("jsonpMode") || "bare").toLowerCase();
-
-  // forceMode=1 means NEVER fall back to another style
-  const FORCE_MODE = qs.get("forceMode") === "1";
-
-  const $ein = document.getElementById("ein");
-  const $type = document.getElementById("orgType");
-  const $btn = document.getElementById("validateBtn");
-  const $badge = document.getElementById("badge");
-  const $details = document.getElementById("details");
-  const $debug = document.getElementById("debugPanel");
+  const $ein       = document.getElementById("ein");
+  const $btn       = document.getElementById("validateBtn");
+  const $badge     = document.getElementById("badge");
+  const $details   = document.getElementById("details");
+  const $debug     = document.getElementById("debugPanel");
   const $einPretty = document.getElementById("einPretty");
 
   const debugLines = [];
-  const safe = (o) => { try { return JSON.stringify(o); } catch { return String(o); } };
+  const safe = (o) => { try { return JSON.stringify(o, null, 2); } catch { return String(o); } };
+
   function log(msg, obj) {
     if (!DEBUG) return;
-    const line = `[${new Date().toISOString()}] ${msg}` + (obj ? ` | ${safe(obj)}` : "");
+    const line = `[${new Date().toISOString()}] ${msg}` + (obj !== undefined ? `\n${safe(obj)}` : "");
     debugLines.push(line);
     if (debugLines.length > 220) debugLines.shift();
     console.log(line);
     $debug.style.display = "block";
     $debug.textContent =
-      `DEBUG=1 dump=${DUMP ? 1 : 0} mode=${modeParam} forceMode=${FORCE_MODE ? 1 : 0}\n` +
-      `Origin=${location.origin}\n` +
-      `JFCustomWidget=${typeof window.JFCustomWidget}\n\n` +
-      debugLines.join("\n");
+      `DEBUG=1  dump=${DUMP ? 1 : 0}\nOrigin=${location.origin}\n\n` +
+      debugLines.join("\n\n");
   }
 
-  // Update EIN display
   const normalizeEin = (raw) => String(raw || "").replace(/\D/g, "").slice(0, 9);
-  const prettyEin = (d) => (d.length === 9) ? (d.slice(0,2) + "-" + d.slice(2)) : "—";
+  const prettyEin    = (d)   => d.length === 9 ? `${d.slice(0,2)}-${d.slice(2)}` : "—";
 
   function setBadge(kind, text) {
     $badge.className = "badge " + kind;
     $badge.textContent = text;
   }
 
-  function jsonpLoad(finalUrl, cbName, timeoutMs = 15000) {
-    return new Promise((resolve, reject) => {
-      log("JSONP start", {
-        finalUrl,
-        hasCallbackEquals: finalUrl.includes("callback="),
-        hasCallbackBare: finalUrl.includes("?callback&") || finalUrl.includes("&callback&") || finalUrl.endsWith("?callback") || finalUrl.includes("?callback&"),
-        cbName
-      });
+  // Calls our own Vercel serverless function (/api/ein?ein=XXXXXXXXX),
+  // which proxies ProPublica and adds CORS headers.
+  async function jsonpFetch(einDigits, timeoutMs = 15000) {
+    const url = `/api/ein?ein=${einDigits}`;
+    log("fetch →", url);
 
-      const script = document.createElement("script");
-      script.async = true;
-      script.src = finalUrl;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-      let done = false;
-      const start = performance.now();
-
-      function cleanup() {
-        done = true;
-        try { delete window[cbName]; } catch {}
-        if (script.parentNode) script.parentNode.removeChild(script);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      log("HTTP status", res.status);
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(`HTTP ${res.status} — ${body.error ?? res.statusText}`);
       }
-
-      const timer = setTimeout(() => {
-        if (done) return;
-        cleanup();
-        log("JSONP timeout", { ms: Math.round(performance.now() - start), finalUrl });
-        reject(new Error("JSONP timeout"));
-      }, timeoutMs);
-
-      window[cbName] = (data) => {
-        if (done) return;
-        clearTimeout(timer);
-        cleanup();
-        log("JSONP callback fired", { ms: Math.round(performance.now() - start) });
-        if (DUMP) {
-          try {
-            log("DATA keys", Object.keys(data || {}));
-            log("DATA preview", String(JSON.stringify(data)).slice(0, 1200));
-          } catch (e) {
-            log("DATA dump failed", { err: String(e) });
-          }
-        }
-        resolve(data);
-      };
-
-      script.onload = () => log("JSONP script onload", { ms: Math.round(performance.now() - start), finalUrl });
-      script.onerror = () => {
-        clearTimeout(timer);
-        cleanup();
-        log("JSONP script onerror", { ms: Math.round(performance.now() - start), finalUrl });
-        reject(new Error("JSONP script load failed (blocked or network error)"));
-      };
-
-      document.head.appendChild(script);
-    });
-  }
-
-  // Build JSONP URL in the exact mode requested
-  function buildJsonpUrl(einDigits, mode) {
-    const baseUrl = `${PROPUBLICA_BASE}/organizations/${einDigits}.json`;
-    const ts = Date.now();
-    const cbName = "ppcb" + ts + Math.floor(Math.random() * 100000);
-
-    let finalUrl;
-    if (mode === "bare") {
-      finalUrl = `${baseUrl}?callback&ts=${ts}`;
-    } else if (mode === "empty") {
-      finalUrl = `${baseUrl}?callback=&ts=${ts}`;
-    } else {
-      // named
-      finalUrl = `${baseUrl}?callback=${cbName}&ts=${ts}`;
+      const data = await res.json();
+      if (DUMP) log("response body", data);
+      return data;
+    } finally {
+      clearTimeout(timer);
     }
-    return { finalUrl, cbName };
   }
 
   async function validate() {
@@ -210,47 +154,47 @@
     $btn.disabled = true;
 
     try {
-      // Force exactly the requested mode; do not “auto-try named first”
-      const { finalUrl, cbName } = buildJsonpUrl(einDigits, modeParam);
+      const data = await jsonpFetch(einDigits);
 
-      // If forceMode=0 and you want to try fallbacks, you can add that later.
-      // Right now you explicitly want to control whether it uses '=' or not.
-      if (!FORCE_MODE) {
-        log("NOTE", { message: "forceMode is off; but this build uses only the selected modeParam." });
+      if (!data || !data.organization) {
+        setBadge("bad", "NOT FOUND");
+        $details.textContent =
+          `EIN ${prettyEin(einDigits)} was not found in the ProPublica database.\n` +
+          `This may mean it is not a tax-exempt organization, or it has not yet been indexed.`;
+        return;
       }
 
-      const data = await jsonpLoad(finalUrl, cbName);
+      const org        = data.organization;
+      const subsection = typeof org.subsection_code === "number" ? org.subsection_code : null;
 
-      const org = data && data.organization ? data.organization : null;
-      const found = !!org;
-      const subsection = org && typeof org.subsection_code === "number" ? org.subsection_code : null;
-
-      setBadge("ok", "RECEIVED DATA");
+      setBadge("ok", "VALID");
       $details.textContent =
-        `Found: ${found}\n` +
-        `Name: ${org && org.name ? org.name : ""}\n` +
-        `subsection_code: ${subsection}\n` +
-        `Raw organization object present: ${!!org}`;
+        `Name:             ${org.name        ?? "—"}\n` +
+        `EIN:              ${prettyEin(einDigits)}\n` +
+        `subsection_code:  ${subsection      ?? "—"}\n` +
+        `State:            ${org.state       ?? "—"}\n` +
+        `City:             ${org.city        ?? "—"}\n` +
+        `NTEE:             ${org.ntee_code   ?? "—"}\n` +
+        `Ruling date:      ${org.ruling_date ?? "—"}`;
 
     } catch (e) {
-      setBadge("bad", "FAIL");
-      $details.textContent = "Debug: " + String(e && e.message ? e.message : e);
-      log("VALIDATE failed", { err: String(e) });
+      setBadge("bad", "ERROR");
+      $details.textContent = String(e?.message ?? e);
+      log("validate failed", String(e));
     } finally {
       $btn.disabled = false;
     }
   }
 
   $btn.addEventListener("click", validate);
+  $ein.addEventListener("keydown", (e) => { if (e.key === "Enter") validate(); });
   $ein.addEventListener("input", () => {
     const d = normalizeEin($ein.value);
     if (d.length > 9) $ein.value = d.slice(0, 9);
     $einPretty.textContent = prettyEin(normalizeEin($ein.value));
   });
 
-  // Initial debug line
-  log("Loaded", { modeParam, FORCE_MODE });
-
+  log("Loaded");
 })();
 </script>
 
