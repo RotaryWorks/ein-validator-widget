@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>EIN Validator Widget</title>
+
+  <!-- Jotform Custom Widget API -->
+  <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
+
+  <style>
+    :root{
+      --ok:#107c10; --bad:#a80000; --muted:#605e5c;
+      --border:#d6d6d6; --soft:#f7f7f7; --radius:12px;
+      --font:14px/1.35 "Segoe UI", Arial, sans-serif;
+    }
+    body{ margin:0; padding:8px; font:var(--font); color:#111; background:transparent; }
+    button{ padding:10px 18px; border:1px solid var(--border); border-radius:10px; background:var(--soft); cursor:pointer; font:var(--font); }
+    button.primary{ background:#1f6feb; border-color:#1f6feb; color:#fff; font-weight:600; }
+    button:disabled{ opacity:.6; cursor:not-allowed; }
+    .badge{ display:inline-block; padding:6px 10px; border-radius:999px; font-weight:700; border:1px solid transparent; margin-left:10px; vertical-align:middle; }
+    .badge.ok     { color:var(--ok);  border-color:rgba(16,124,16,.35); background:rgba(16,124,16,.08); }
+    .badge.bad    { color:var(--bad); border-color:rgba(168,0,0,.35);   background:rgba(168,0,0,.08);   }
+    .badge.neutral{ color:#333;       border-color:rgba(0,0,0,.15);     background:rgba(0,0,0,.04);     }
+    .details{ white-space:pre-wrap; font-size:13px; margin-top:10px; color:#333; line-height:1.5; }
+    .debugPanel{
+      margin-top:10px; padding:10px; border:1px dashed #999; border-radius:10px;
+      font-family:ui-monospace, Menlo, Consolas, monospace;
+      font-size:11px; white-space:pre-wrap; max-height:300px; overflow:auto; display:none;
+    }
+  </style>
+</head>
+
+<body>
+  <div>
+    <button id="validateBtn" class="primary" type="button">Validate EIN</button>
+    <span id="badge" class="badge neutral">NOT VALIDATED</span>
+  </div>
+  <div id="details" class="details"></div>
+  <div id="debugPanel" class="debugPanel"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ── Config from URL params ───────────────────────────────────────────────────
+  // Set these when adding the widget URL in Jotform:
+  //   ?einField=q3_ein&typeField=q5_orgType&apiBase=https://your-project.vercel.app
+  //
+  // einField  — the "name" attribute of the native EIN field (find it in Jotform's
+  //             field settings under "Field Name", e.g. "q3_ein")
+  // typeField — the "name" attribute of the org type dropdown field
+  // apiBase   — your Vercel deployment URL (omit if widget.html is on Vercel itself)
+  const qs        = new URLSearchParams(location.search);
+  const EIN_FIELD  = qs.get("einField")  || "";
+  const TYPE_FIELD = qs.get("typeField") || "";
+  const API_BASE   = qs.get("apiBase")   || "";
+  const DEBUG      = qs.get("debug") === "1";
+  const DUMP       = qs.get("dump")  === "1";
+
+  const $btn     = document.getElementById("validateBtn");
+  const $badge   = document.getElementById("badge");
+  const $details = document.getElementById("details");
+  const $debug   = document.getElementById("debugPanel");
+
+  let validatedEin = "";
+
+  // ── Debug logging ────────────────────────────────────────────────────────────
+  const debugLines = [];
+  const safe = (o) => { try { return JSON.stringify(o, null, 2); } catch { return String(o); } };
+
+  function log(msg, obj) {
+    if (!DEBUG) return;
+    const line = `[${new Date().toISOString()}] ${msg}` + (obj !== undefined ? `\n${safe(obj)}` : "");
+    debugLines.push(line);
+    if (debugLines.length > 220) debugLines.shift();
+    console.log(line);
+    $debug.style.display = "block";
+    $debug.textContent =
+      `einField=${EIN_FIELD || "(not set)"}  typeField=${TYPE_FIELD || "(not set)"}\n` +
+      `apiBase=${API_BASE || "(relative)"}  dump=${DUMP ? 1 : 0}\n` +
+      `JFCustomWidget=${typeof window.JFCustomWidget}\n\n` +
+      debugLines.join("\n\n");
+  }
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+  const normalizeEin = (raw) => String(raw || "").replace(/\D/g, "").slice(0, 9);
+  const prettyEin    = (d)   => d.length === 9 ? `${d.slice(0,2)}-${d.slice(2)}` : d;
+
+  function setBadge(kind, text) {
+    $badge.className  = "badge " + kind;
+    $badge.textContent = text;
+  }
+
+  // ── Jotform detection ────────────────────────────────────────────────────────
+  const JF_SETUP_INSTRUCTIONS = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  EIN Validator Widget — Setup Required
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  This widget (widget.html) reads EIN and Type from
+  native Jotform fields. The following must be configured:
+
+  1. Add a Short Text field for EIN. Note its Field Name
+     (field settings → Field Name), e.g. "q3_ein".
+
+  2. Add a Dropdown field for Org Type with these exact
+     values (not labels — the value attribute):
+       501c3  →  501(c)(3)
+       501c1  →  501(c)(1)
+       170c1  →  170(c)(1) Government
+       other  →  Other
+
+  3. Add a Short Text field for the validated EIN result.
+     Mark it Read Only and Hidden. This is what the widget
+     populates. Note its Field Name, e.g. "q7_validatedEin".
+
+  4. Add a Custom Widget field. Set its URL to:
+       https://your-project.vercel.app/widget.html
+         ?einField=q3_ein
+         &typeField=q5_orgType
+     (replace field names with your actual Field Names)
+
+  5. The Custom Widget field itself IS the validatedEin
+     field — map its value to your read-only hidden field
+     in the widget's Advanced settings → "Populate field".
+
+  6. Ensure https://js.jotform.com/JotFormCustomWidget.min.js
+     is not blocked by a Content Security Policy.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+  function detectJotform() {
+    return typeof window.JFCustomWidget !== "undefined"
+      && typeof window.JFCustomWidget.subscribe  === "function"
+      && typeof window.JFCustomWidget.setValue   === "function"
+      && typeof window.JFCustomWidget.sendSubmit === "function"
+      && typeof window.JFCustomWidget.getFormData === "function";
+  }
+
+  const IN_JOTFORM = detectJotform();
+  log("Jotform detected", IN_JOTFORM);
+
+  if (!IN_JOTFORM) {
+    console.warn(JF_SETUP_INSTRUCTIONS);
+  }
+
+  // ── Read a field value out of JFCustomWidget.getFormData() ───────────────────
+  // Jotform field data comes back as { fieldName: { value: "..." }, ... }
+  // or sometimes { fieldName: "..." } depending on field type — handle both.
+  function getFieldValue(formData, fieldName) {
+    if (!fieldName || !formData) return "";
+    const entry = formData[fieldName];
+    if (entry === undefined || entry === null) return "";
+    if (typeof entry === "object" && "value" in entry) return String(entry.value ?? "");
+    return String(entry);
+  }
+
+  // ── Jotform value management ─────────────────────────────────────────────────
+  function jfSetValue(formatted) {
+    validatedEin = formatted;
+    if (IN_JOTFORM) {
+      JFCustomWidget.setValue(formatted);
+      log("JFCustomWidget.setValue", formatted);
+    }
+  }
+
+  function jfClearValue() {
+    validatedEin = "";
+    if (IN_JOTFORM) {
+      JFCustomWidget.setValue("");
+      log("JFCustomWidget.setValue cleared");
+    }
+  }
+
+  if (IN_JOTFORM) {
+    JFCustomWidget.subscribe("ready", (data) => {
+      log("JF ready", data);
+      const existing = JFCustomWidget.getValue();
+      if (existing) {
+        validatedEin = existing;
+        setBadge("ok", "VALID");
+        $details.textContent = `Previously validated: ${existing}`;
+        log("restored value", existing);
+      }
+
+      // Warn at runtime if field names weren't passed in the URL
+      if (!EIN_FIELD || !TYPE_FIELD) {
+        console.warn(
+          "[EIN Widget] einField and/or typeField URL params are not set.\n" +
+          "Add them to the widget URL, e.g.:\n" +
+          "  widget.html?einField=q3_ein&typeField=q5_orgType"
+        );
+      }
+    });
+
+    JFCustomWidget.subscribe("submit", () => {
+      log("JF submit, sending", validatedEin);
+      JFCustomWidget.sendSubmit({ value: validatedEin });
+    });
+  }
+
+  // ── ProPublica API call ───────────────────────────────────────────────────────
+  async function fetchEin(einDigits, timeoutMs = 15000) {
+    const url = `${API_BASE}/api/ein?ein=${einDigits}`;
+    log("fetch →", url);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      log("HTTP status", res.status);
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(`HTTP ${res.status} — ${body.error ?? res.statusText}`);
+      }
+      const data = await res.json();
+      if (DUMP) log("response body", data);
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // ── Validate ──────────────────────────────────────────────────────────────────
+  async function validate() {
+    // Read EIN and Type from the live form data
+    let einRaw  = "";
+    let orgType = "";
+
+    if (IN_JOTFORM && EIN_FIELD && TYPE_FIELD) {
+      const formData = JFCustomWidget.getFormData();
+      log("formData", formData);
+      einRaw  = getFieldValue(formData, EIN_FIELD);
+      orgType = getFieldValue(formData, TYPE_FIELD);
+    } else if (!IN_JOTFORM) {
+      // Outside Jotform: show a clear message rather than silently doing nothing
+      setBadge("bad", "NOT IN JOTFORM");
+      $details.textContent =
+        "This widget must run inside a Jotform form.\n" +
+        "Check the browser console for setup instructions.";
+      return;
+    } else {
+      setBadge("bad", "CONFIG ERROR");
+      $details.textContent =
+        "Widget URL is missing einField and/or typeField params.\n" +
+        "Check the browser console for setup instructions.";
+      return;
+    }
+
+    const einDigits = normalizeEin(einRaw);
+
+    if (einDigits.length !== 9) {
+      setBadge("bad", "FAIL");
+      $details.textContent =
+        `EIN field (${EIN_FIELD}) returned "${einRaw}".\n` +
+        `Need exactly 9 digits — got ${einDigits.length}.`;
+      jfClearValue();
+      return;
+    }
+
+    if (!orgType) {
+      setBadge("bad", "FAIL");
+      $details.textContent = `Org Type field (${TYPE_FIELD}) is empty. Please select a type.`;
+      jfClearValue();
+      return;
+    }
+
+    setBadge("neutral", "CHECKING…");
+    $btn.disabled = true;
+    jfClearValue();
+
+    try {
+      const data      = await fetchEin(einDigits);
+      const org       = data?.organization ?? null;
+      const subsection = typeof org?.subsection_code === "number" ? org.subsection_code : null;
+      const formatted  = prettyEin(einDigits);
+
+      const orgInfo = org
+        ? `Name:             ${org.name        ?? "—"}\n` +
+          `EIN:              ${formatted}\n` +
+          `subsection_code:  ${subsection      ?? "—"}\n` +
+          `State:            ${org.state       ?? "—"}\n` +
+          `City:             ${org.city        ?? "—"}\n` +
+          `NTEE:             ${org.ntee_code   ?? "—"}\n` +
+          `Ruling date:      ${org.ruling_date ?? "—"}`
+        : `EIN: ${formatted}\nNo ProPublica record found.`;
+
+      if (orgType === "501c3") {
+        if (subsection === 3) {
+          setBadge("ok", "VALID — 501(c)(3)");
+          $details.textContent = orgInfo;
+          jfSetValue(formatted);
+        } else {
+          setBadge("bad", "FAIL — Not a 501(c)(3)");
+          $details.textContent =
+            `Selected type 501(c)(3) requires subsection_code 3.\n` +
+            `Found: ${subsection ?? "(no record)"}\n\n` + orgInfo;
+        }
+
+      } else if (orgType === "501c1") {
+        if (subsection === 1) {
+          setBadge("ok", "VALID — 501(c)(1)");
+          $details.textContent = orgInfo;
+          jfSetValue(formatted);
+        } else {
+          setBadge("bad", "FAIL — Not a 501(c)(1)");
+          $details.textContent =
+            `Selected type 501(c)(1) requires subsection_code 1.\n` +
+            `Found: ${subsection ?? "(no record)"}\n\n` + orgInfo;
+        }
+
+      } else if (orgType === "170c1") {
+        if (!org) {
+          setBadge("ok", "VALID — Government §170(c)(1)");
+          $details.textContent =
+            `EIN: ${formatted}\n` +
+            `No ProPublica exempt-org record found, which is expected for\n` +
+            `governmental entities filing under IRC §170(c)(1).`;
+          jfSetValue(formatted);
+        } else {
+          setBadge("bad", "FAIL — Record found for §170(c)(1) entity");
+          $details.textContent =
+            `Selected type Government §170(c)(1), but this EIN has an exempt-org\n` +
+            `record in ProPublica, suggesting it may be a private nonprofit rather\n` +
+            `than a governmental entity.\n\n` + orgInfo;
+        }
+
+      } else if (orgType === "other") {
+        setBadge("ok", "VALID — Review Required");
+        $details.textContent =
+          `⚠ Type "Other" was selected. This EIN has been accepted, but additional\n` +
+          `documentation may be requested to verify eligibility.\n\n` + orgInfo;
+        jfSetValue(formatted);
+
+      } else {
+        setBadge("bad", "FAIL — Unknown type");
+        $details.textContent = `Unrecognised org type value: "${orgType}"\nCheck the Type field's option values.`;
+      }
+
+    } catch (e) {
+      setBadge("bad", "ERROR");
+      $details.textContent = String(e?.message ?? e);
+      log("validate failed", String(e));
+    } finally {
+      $btn.disabled = false;
+    }
+  }
+
+  $btn.addEventListener("click", validate);
+
+  log("Loaded", { EIN_FIELD, TYPE_FIELD, API_BASE, IN_JOTFORM });
+})();
+</script>
+
+</body>
+</html>
