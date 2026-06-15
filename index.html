@@ -227,6 +227,7 @@
   // ── Validate ─────────────────────────────────────────────────────────────────
   async function validate() {
     const einDigits = normalizeEin($ein.value);
+    const orgType   = document.getElementById("orgType").value;
     $einPretty.textContent = prettyEin(einDigits);
 
     if (einDigits.length !== 9) {
@@ -242,31 +243,81 @@
 
     try {
       const data = await fetchEin(einDigits);
+      const org  = data?.organization ?? null;
 
-      if (!data || !data.organization) {
-        setBadge("bad", "NOT FOUND");
-        $details.textContent =
-          `EIN ${prettyEin(einDigits)} was not found in the ProPublica database.\n` +
-          `This may mean it is not a tax-exempt organization, or it has not yet been indexed.`;
-        return;
-      }
-
-      const org        = data.organization;
-      const subsection = typeof org.subsection_code === "number" ? org.subsection_code : null;
+      const subsection = typeof org?.subsection_code === "number" ? org.subsection_code : null;
       const formatted  = prettyEin(einDigits);
 
-      setBadge("ok", "VALID");
-      $details.textContent =
-        `Name:             ${org.name        ?? "—"}\n` +
-        `EIN:              ${formatted}\n` +
-        `subsection_code:  ${subsection      ?? "—"}\n` +
-        `State:            ${org.state       ?? "—"}\n` +
-        `City:             ${org.city        ?? "—"}\n` +
-        `NTEE:             ${org.ntee_code   ?? "—"}\n` +
-        `Ruling date:      ${org.ruling_date ?? "—"}`;
+      // Base org info lines (shown on any result where we have a record)
+      const orgInfo = org
+        ? `Name:             ${org.name        ?? "—"}\n` +
+          `EIN:              ${formatted}\n` +
+          `subsection_code:  ${subsection      ?? "—"}\n` +
+          `State:            ${org.state       ?? "—"}\n` +
+          `City:             ${org.city        ?? "—"}\n` +
+          `NTEE:             ${org.ntee_code   ?? "—"}\n` +
+          `Ruling date:      ${org.ruling_date ?? "—"}`
+        : `EIN: ${formatted}\nNo ProPublica record found.`;
 
-      // ✅ Populate the Jotform field with the validated EIN
-      jfSetValue(formatted);
+      // ── Type-specific pass/fail logic ───────────────────────────────────────
+      if (orgType === "501c3") {
+        if (subsection === 3) {
+          setBadge("ok", "VALID — 501(c)(3)");
+          $details.textContent = orgInfo;
+          jfSetValue(formatted);
+        } else {
+          setBadge("bad", "FAIL — Not a 501(c)(3)");
+          $details.textContent =
+            `Selected type 501(c)(3) requires subsection_code 3.\n` +
+            `Found: ${subsection ?? "(no record)"}\n\n` + orgInfo;
+          jfClearValue();
+        }
+
+      } else if (orgType === "501c1") {
+        if (subsection === 1) {
+          setBadge("ok", "VALID — 501(c)(1)");
+          $details.textContent = orgInfo;
+          jfSetValue(formatted);
+        } else {
+          setBadge("bad", "FAIL — Not a 501(c)(1)");
+          $details.textContent =
+            `Selected type 501(c)(1) requires subsection_code 1.\n` +
+            `Found: ${subsection ?? "(no record)"}\n\n` + orgInfo;
+          jfClearValue();
+        }
+
+      } else if (orgType === "170c1") {
+        // Government entities under IRC §170(c)(1) typically do NOT appear in
+        // ProPublica's exempt-org dataset. A missing record is the expected pass case.
+        if (!org) {
+          setBadge("ok", "VALID — Government §170(c)(1)");
+          $details.textContent =
+            `EIN: ${formatted}\n` +
+            `No ProPublica exempt-org record found, which is expected for\n` +
+            `governmental entities filing under IRC §170(c)(1).`;
+          jfSetValue(formatted);
+        } else {
+          setBadge("bad", "FAIL — Record found for §170(c)(1) entity");
+          $details.textContent =
+            `Selected type Government §170(c)(1), but this EIN has an exempt-org\n` +
+            `record in ProPublica, suggesting it may be a private nonprofit rather\n` +
+            `than a governmental entity.\n\n` + orgInfo;
+          jfClearValue();
+        }
+
+      } else if (orgType === "other") {
+        // Always pass, but warn that documentation may be required
+        setBadge("ok", "VALID — Review Required");
+        $details.textContent =
+          `⚠ Type "Other" was selected. This EIN has been accepted, but additional\n` +
+          `documentation may be requested to verify eligibility.\n\n` + orgInfo;
+        jfSetValue(formatted);
+
+      } else {
+        setBadge("bad", "FAIL — Unknown type");
+        $details.textContent = `Unrecognised org type: ${orgType}`;
+        jfClearValue();
+      }
 
     } catch (e) {
       setBadge("bad", "ERROR");
