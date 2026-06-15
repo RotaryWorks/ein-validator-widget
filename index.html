@@ -147,9 +147,48 @@
   }
 
   // ── Jotform integration ──────────────────────────────────────────────────────
+  // JFCustomWidget is injected by Jotform when this page runs as a custom widget.
+  // If it's missing or non-functional, we degrade gracefully and warn the developer.
+  const JF_SETUP_INSTRUCTIONS = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Jotform Custom Widget — NOT CONNECTED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  The widget is running outside of Jotform (or the
+  JFCustomWidget API failed to load). The EIN validator
+  works normally, but validated values will NOT be sent
+  back to the form.
+
+  To connect this widget to Jotform:
+  1. In your form, add a "Widget" field (Add Form Element
+     → Widgets → search "Custom Widget").
+  2. In the widget settings, set the Widget URL to the
+     URL where this index.html is hosted (your Vercel URL).
+  3. Add a separate Short Text field for the EIN result,
+     mark it Read Only, and note its field ID/name.
+  4. In the Widget field's Advanced settings, map the
+     widget's output value to that Short Text field.
+  5. Make sure https://js.jotform.com/JotFormCustomWidget.min.js
+     is not blocked by a Content Security Policy.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+  function detectJotform() {
+    if (typeof window.JFCustomWidget === "undefined") return false;
+    if (typeof window.JFCustomWidget.subscribe !== "function") return false;
+    if (typeof window.JFCustomWidget.setValue   !== "function") return false;
+    if (typeof window.JFCustomWidget.sendSubmit !== "function") return false;
+    return true;
+  }
+
+  const IN_JOTFORM = detectJotform();
+  log("Jotform detected", IN_JOTFORM);
+
+  if (!IN_JOTFORM) {
+    console.warn(JF_SETUP_INSTRUCTIONS);
+  }
+
   function jfSetValue(formatted) {
     validatedEin = formatted;
-    if (typeof JFCustomWidget !== "undefined") {
+    if (IN_JOTFORM) {
       JFCustomWidget.setValue(formatted);
       log("JFCustomWidget.setValue", formatted);
     }
@@ -157,13 +196,13 @@
 
   function jfClearValue() {
     validatedEin = "";
-    if (typeof JFCustomWidget !== "undefined") {
+    if (IN_JOTFORM) {
       JFCustomWidget.setValue("");
       log("JFCustomWidget.setValue cleared");
     }
   }
 
-  if (typeof JFCustomWidget !== "undefined") {
+  if (IN_JOTFORM) {
     // Restore any previously saved value when the widget loads
     JFCustomWidget.subscribe("ready", (data) => {
       log("JF ready", data);
