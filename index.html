@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>EIN Validator (JSONP Debug)</title>
+  <title>EIN Validator</title>
 
   <!-- Jotform Custom Widget API -->
   <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
 
   <style>
     :root{
-      --ok:#107c10; --bad:#a80000; --warn:#8a6d3b; --muted:#605e5c;
+      --ok:#107c10; --bad:#a80000; --muted:#605e5c;
       --border:#d6d6d6; --soft:#f7f7f7; --radius:12px;
       --font:14px/1.35 "Segoe UI", Arial, sans-serif;
     }
@@ -56,7 +56,7 @@
           <option value="170c1">170(c)(1) Government</option>
           <option value="other">Other</option>
         </select>
-        <div class="hint">Debug URL example: <span class="mono">?debug=1&dump=1</span></div>
+        <div class="hint">Debug: <span class="mono">?debug=1&dump=1</span></div>
       </div>
 
       <div>
@@ -75,15 +75,14 @@
 (() => {
   "use strict";
 
-  // ProPublica Nonprofit Explorer does NOT send CORS headers, so fetch() is blocked.
-  // JSONP is the correct approach — but it requires a NAMED callback parameter,
-  // e.g. ?callback=myFn so the server wraps the JSON: myFn({...})
-  // Bare (?callback) or empty (?callback=) do not work.
-  const PROPUBLICA_BASE = "https://projects.propublica.org/nonprofits/api/v2";
-
   const qs    = new URLSearchParams(location.search);
   const DEBUG = qs.get("debug") === "1";
   const DUMP  = qs.get("dump")  === "1";
+
+  // When hosted on Vercel, /api/ein is served by the serverless function.
+  // Override with ?apiBase=https://your-project.vercel.app if index.html
+  // is hosted elsewhere (e.g. GitHub Pages).
+  const API_BASE = qs.get("apiBase") || "";
 
   const $ein       = document.getElementById("ein");
   const $btn       = document.getElementById("validateBtn");
@@ -92,6 +91,12 @@
   const $debug     = document.getElementById("debugPanel");
   const $einPretty = document.getElementById("einPretty");
 
+  // ── Jotform widget state ────────────────────────────────────────────────────
+  // validatedEin holds the formatted EIN (XX-XXXXXXX) once validated,
+  // or "" if not yet validated. This is the value sent back to the form.
+  let validatedEin = "";
+
+  // ── Debug logging ───────────────────────────────────────────────────────────
   const debugLines = [];
   const safe = (o) => { try { return JSON.stringify(o, null, 2); } catch { return String(o); } };
 
@@ -103,10 +108,12 @@
     console.log(line);
     $debug.style.display = "block";
     $debug.textContent =
-      `DEBUG=1  dump=${DUMP ? 1 : 0}\nOrigin=${location.origin}\n\n` +
+      `DEBUG=1  dump=${DUMP ? 1 : 0}\nOrigin=${location.origin}\n` +
+      `JFCustomWidget=${typeof window.JFCustomWidget}\n\n` +
       debugLines.join("\n\n");
   }
 
+  // ── Helpers ─────────────────────────────────────────────────────────────────
   const normalizeEin = (raw) => String(raw || "").replace(/\D/g, "").slice(0, 9);
   const prettyEin    = (d)   => d.length === 9 ? `${d.slice(0,2)}-${d.slice(2)}` : "—";
 
@@ -115,10 +122,9 @@
     $badge.textContent = text;
   }
 
-  // Calls our own Vercel serverless function (/api/ein?ein=XXXXXXXXX),
-  // which proxies ProPublica and adds CORS headers.
-  async function jsonpFetch(einDigits, timeoutMs = 15000) {
-    const url = `/api/ein?ein=${einDigits}`;
+  // ── API call ─────────────────────────────────────────────────────────────────
+  async function fetchEin(einDigits, timeoutMs = 15000) {
+    const url = `${API_BASE}/api/ein?ein=${einDigits}`;
     log("fetch →", url);
 
     const controller = new AbortController();
@@ -140,6 +146,46 @@
     }
   }
 
+  // ── Jotform integration ──────────────────────────────────────────────────────
+  function jfSetValue(formatted) {
+    validatedEin = formatted;
+    if (typeof JFCustomWidget !== "undefined") {
+      JFCustomWidget.setValue(formatted);
+      log("JFCustomWidget.setValue", formatted);
+    }
+  }
+
+  function jfClearValue() {
+    validatedEin = "";
+    if (typeof JFCustomWidget !== "undefined") {
+      JFCustomWidget.setValue("");
+      log("JFCustomWidget.setValue cleared");
+    }
+  }
+
+  if (typeof JFCustomWidget !== "undefined") {
+    // Restore any previously saved value when the widget loads
+    JFCustomWidget.subscribe("ready", (data) => {
+      log("JF ready", data);
+      const existing = JFCustomWidget.getValue();
+      if (existing) {
+        $ein.value  = String(existing).replace(/\D/g, "");
+        $einPretty.textContent = existing;
+        validatedEin = existing;
+        setBadge("ok", "VALID");
+        $details.textContent = `Previously validated: ${existing}`;
+        log("restored value", existing);
+      }
+    });
+
+    // Send the validated EIN back to Jotform on form submit
+    JFCustomWidget.subscribe("submit", () => {
+      log("JF submit, sending", validatedEin);
+      JFCustomWidget.sendSubmit({ value: validatedEin });
+    });
+  }
+
+  // ── Validate ─────────────────────────────────────────────────────────────────
   async function validate() {
     const einDigits = normalizeEin($ein.value);
     $einPretty.textContent = prettyEin(einDigits);
@@ -147,14 +193,16 @@
     if (einDigits.length !== 9) {
       setBadge("bad", "FAIL");
       $details.textContent = "EIN must be exactly 9 digits.";
+      jfClearValue();
       return;
     }
 
     setBadge("neutral", "CHECKING…");
     $btn.disabled = true;
+    jfClearValue();
 
     try {
-      const data = await jsonpFetch(einDigits);
+      const data = await fetchEin(einDigits);
 
       if (!data || !data.organization) {
         setBadge("bad", "NOT FOUND");
@@ -166,16 +214,20 @@
 
       const org        = data.organization;
       const subsection = typeof org.subsection_code === "number" ? org.subsection_code : null;
+      const formatted  = prettyEin(einDigits);
 
       setBadge("ok", "VALID");
       $details.textContent =
         `Name:             ${org.name        ?? "—"}\n` +
-        `EIN:              ${prettyEin(einDigits)}\n` +
+        `EIN:              ${formatted}\n` +
         `subsection_code:  ${subsection      ?? "—"}\n` +
         `State:            ${org.state       ?? "—"}\n` +
         `City:             ${org.city        ?? "—"}\n` +
         `NTEE:             ${org.ntee_code   ?? "—"}\n` +
         `Ruling date:      ${org.ruling_date ?? "—"}`;
+
+      // ✅ Populate the Jotform field with the validated EIN
+      jfSetValue(formatted);
 
     } catch (e) {
       setBadge("bad", "ERROR");
@@ -192,6 +244,8 @@
     const d = normalizeEin($ein.value);
     if (d.length > 9) $ein.value = d.slice(0, 9);
     $einPretty.textContent = prettyEin(normalizeEin($ein.value));
+    // Clear validated state if the user edits the EIN after a successful lookup
+    if (validatedEin) jfClearValue();
   });
 
   log("Loaded");
